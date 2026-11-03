@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Docker">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<link rel="apple-touch-icon" href="/icon.png">
+<link rel="icon" href="/icon.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<title>Docker Apps</title>
+<style>
+  :root { --bg:#f2f2f7; --card:#fff; --text:#111; --muted:#6b6b72; --line:#e3e3e8; --fill:#e9e9ee; --on:#34c759; --off:#c9c9ce;
+          --warn:#ff9f0a; --bad:#ff3b30; --link:#007aff; --code:#f6f6f8; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#000; --card:#1c1c1e; --text:#f5f5f7; --muted:#9a9aa1; --line:#2c2c2e; --fill:#2c2c2e;
+          --off:#3a3a3c; --link:#0a84ff; --code:#111113; } }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.35 -apple-system, system-ui, sans-serif;
+         padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
+  main { max-width: 560px; margin: 0 auto; }
+  header { display:flex; align-items:baseline; justify-content:space-between; margin: 8px 4px 16px; }
+  h1 { font-size: 28px; margin:0; letter-spacing:-.02em; }
+  h2 { font-size:13px; font-weight:400; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:24px 16px 8px; }
+  #stamp { color:var(--muted); font-size:13px; }
+  .card { background:var(--card); border-radius:14px; overflow:hidden; }
+  button { font:inherit; color:inherit; }
+
+  /* host */
+  .host { display:grid; grid-template-columns:repeat(auto-fit, minmax(110px, 1fr)); gap:14px 16px; padding:14px 16px; }
+  .stat .k { color:var(--muted); font-size:12px; }
+  .stat .v { font-weight:600; font-variant-numeric:tabular-nums; }
+  .bar { height:4px; border-radius:2px; background:var(--fill); margin-top:5px; overflow:hidden; }
+  .bar i { display:block; height:100%; background:var(--on); border-radius:2px; }
+  .bar i.warn { background:var(--warn); } .bar i.bad { background:var(--bad); }
+  .hostline { color:var(--muted); font-size:13px; padding:0 16px 12px; margin-top:-4px; }
+  .hostline.warn { color:var(--warn); }
+
+  /* quick open */
+  .tiles { display:grid; grid-template-columns:repeat(2, 1fr); gap:10px; }
+  .tile { display:flex; flex-direction:column; gap:2px; min-height:64px; padding:12px 14px; border:0; border-radius:14px; background:var(--card);
+          text-align:left; text-decoration:none; color:var(--text); cursor:pointer; }
+  .tile .t { font-weight:600; display:flex; align-items:center; gap:7px; }
+  .tile .s { color:var(--muted); font-size:12px; }
+  .tile.down { opacity:.55; }
+  .pconly { color:var(--muted); font-size:13px; margin:10px 4px 0; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--off); flex:none; }
+  .dot.on { background:var(--on); } .dot.warn { background:var(--warn); } .dot.bad { background:var(--bad); }
+
+  /* apps */
+  ul { list-style:none; margin:0; padding:0; }
+  .app + .app { border-top:1px solid var(--line); }
+  .row { display:flex; align-items:center; gap:12px; padding:14px 16px; min-height:68px; }
+  .expand { flex:1; min-width:0; display:flex; align-items:center; gap:10px; border:0; background:none; padding:0; text-align:left; cursor:pointer; }
+  .chev { color:var(--muted); transition:transform .2s; flex:none; }
+  .app.open .chev { transform:rotate(90deg); }
+  .info { flex:1; min-width:0; }
+  .name { font-weight:600; }
+  .sub { color:var(--muted); font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sub.err { color:var(--bad); white-space:normal; }
+  .sub.warn { color:var(--warn); }
+  button.sw { position:relative; width:56px; height:34px; flex:none; border:0; border-radius:17px; background:var(--off); transition:background .2s; padding:0; cursor:pointer; }
+  button.sw::after { content:""; position:absolute; top:2px; left:2px; width:30px; height:30px; border-radius:50%; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.3); transition:transform .2s; }
+  button.sw.on { background:var(--on); }
+  button.sw.on::after { transform:translateX(22px); }
+  button.sw.partial { background:var(--warn); }
+  button.sw.partial::after { transform:translateX(11px); }
+  button.sw.busy { opacity:.55; animation:pulse 1s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity:.3; } }
+
+  .detail { padding:0 16px 14px; display:none; }
+  .app.open .detail { display:block; }
+  .group { background:var(--bg); border-radius:10px; overflow:hidden; margin-top:8px; }
+  .item { display:flex; align-items:center; gap:10px; padding:10px 12px; min-height:48px; }
+  .item + .item { border-top:1px solid var(--line); }
+  .item .info .name { font-weight:500; font-size:15px; }
+  .item .sub { font-size:12px; white-space:normal; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11px; }
+  .item .sub.mono { white-space:nowrap; }
+  .pill { border:0; border-radius:8px; background:var(--fill); padding:0 12px; min-height:34px; font-size:14px; font-weight:500; cursor:pointer; flex:none;
+          display:inline-flex; align-items:center; text-decoration:none; color:var(--text); }
+  .pill.blue { background:var(--link); color:#fff; }
+  .pill.red { color:var(--bad); }
+  .pill:disabled { opacity:.4; }
+  .actions { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+
+  .bulk { display:flex; gap:10px; margin-top:16px; }
+  .bulk button { flex:1; min-height:48px; border:0; border-radius:12px; background:var(--card); font-weight:600; cursor:pointer; }
+  .bulk button.stop { color:var(--bad); }
+  #offline { display:none; margin:12px 4px 0; color:var(--bad); font-size:14px; }
+  .foot { color:var(--muted); font-size:13px; margin:16px 4px 0; }
+
+  /* logs sheet */
+  #sheet { position:fixed; inset:0; z-index:10; display:none; flex-direction:column; background:var(--bg);
+           padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+  #sheet.show { display:flex; }
+  #sheet .top { display:flex; align-items:center; gap:8px; padding:12px 16px; border-bottom:1px solid var(--line); }
+  #sheet .top .info { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #sheet select { font:inherit; font-size:14px; border:0; border-radius:8px; background:var(--fill); color:var(--text); min-height:34px; padding:0 8px; }
+  #logtext { flex:1; margin:0; overflow:auto; padding:12px 16px; background:var(--code); white-space:pre-wrap; word-break:break-word;
+             font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; -webkit-overflow-scrolling:touch; }
+  @media (prefers-reduced-motion: reduce) { button.sw, button.sw::after, .chev { transition:none; } button.sw.busy { animation:none; } }
+</style>
+<script src="/lock.js" data-name="Docker" data-setup="dock password"></script>
+</head>
+<body>
+<main>
+  <header><h1>Docker</h1><span id="stamp"></span></header>
+  <section class="card" id="host"></section>
+  <h2>Open</h2>
+  <div class="tiles" id="tiles"></div>
+  <p class="pconly" id="pconly"></p>
+  <h2>Apps</h2>
+  <ul class="card" id="list"></ul>
+  <div class="bulk"><button id="all-on">Start all</button><button id="all-off" class="stop">Stop all</button></div>
+  <p id="offline">Can't reach the panel. Is the computer awake and on Tailscale?</p>
+  <p class="foot" id="foot"></p>
+</main>
+
+<div id="sheet" role="dialog" aria-modal="true" aria-label="Logs">
+  <div class="top">
+    <div class="info" id="logtitle">Logs</div>
+    <select id="loglines" aria-label="Lines"><option>100</option><option selected>300</option><option>1000</option></select>
+    <button class="pill" id="logrefresh">Refresh</button>
+    <button class="pill blue" id="logclose">Done</button>
+  </div>
+  <pre id="logtext"></pre>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const post = (path) => fetch(path, { method: "POST", headers: { "X-Dock": "1" } });
+const opened = new Set(JSON.parse(localStorageGet("dock.open") || "[]"));
+let state = null;
+
+function localStorageGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
+function saveOpen() { try { localStorage.setItem("dock.open", JSON.stringify([...opened])); } catch {} }
+
+const gb = (b) => { const g = b / 1024 ** 3; return g >= 1000 ? (g / 1024).toFixed(1) + " TB" : (g >= 100 ? g.toFixed(0) : g.toFixed(1)) + " GB"; };
+function ago(iso) {
+  if (!iso || iso.startsWith("0001")) return "";
+  let s = Math.max(0, (Date.now() - new Date(iso)) / 1000);
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : m ? `${m}m` : `${Math.floor(s)}s`;
+}
+const working = (a) => !!a.busy && !a.busy.startsWith("error");
+
+async function act(app, action) {
+  if (action === "off" && !confirm(`Stop ${app.label}?`)) return;
+  if (action === "restart" && !confirm(`Restart ${app.label}?`)) return;
+  const r = await post(`/api/apps/${app.id}/${action}`);
+  if (r.status === 409) alert(`${app.label} is still busy. Try again in a few seconds.`);
+  refresh();
+}
+
+async function restartContainer(name) {
+  if (!confirm(`Restart ${name}?`)) return;
+  const r = await post(`/api/containers/${encodeURIComponent(name)}/restart`);
+  if (r.status === 409) alert("That app is still busy. Try again in a few seconds.");
+  refresh();
+}
+
+// ---- host
+function bar(pct) {
+  const b = el("div", "bar"), i = el("i", pct > 90 ? "bad" : pct > 75 ? "warn" : "");
+  i.style.width = Math.min(100, pct) + "%"; b.append(i); return b;
+}
+function stat(k, v, pct) {
+  const s = el("div", "stat"); s.append(el("div", "k", k), el("div", "v", v));
+  if (pct != null) s.append(bar(pct));
+  return s;
+}
+function renderHost(h) {
+  const grid = el("div", "host");
+  grid.append(stat("CPU", h.cpu == null ? "…" : `${h.cpu}%`, h.cpu ?? 0));
+  grid.append(stat("Memory", `${gb(h.mem.used)} / ${gb(h.mem.total)}`, 100 * h.mem.used / h.mem.total));
+  for (const d of h.disks) grid.append(stat(d.label, `${gb(d.total - d.used)} free`, 100 * d.used / d.total));
+  const up = ago(new Date(Date.now() - h.uptime * 1000).toISOString());
+  const line = el("div", "hostline", `${h.name} · up ${up} · load ${h.load.map((x) => x.toFixed(2)).join(" ")} · ${h.cores} cores`);
+  $("host").replaceChildren(grid, line, ...backupLine(h.backup));
+}
+// The backup timer runs nightly, so past 36 hours a run has been missed or has failed.
+function backupLine(b) {
+  if (!b) return [];
+  if (b.age == null) return [el("div", "hostline warn", "Backup: none yet")];
+  const when = ago(new Date(Date.now() - b.age * 1000).toISOString());
+  const late = b.age > 36 * 3600;
+  const problem = late ? ", overdue" : b.warnings ? `, ${b.warnings} warning${b.warnings > 1 ? "s" : ""}` : "";
+  return [el("div", problem ? "hostline warn" : "hostline", `Backup: ${when} ago${problem}`)];
+}
+
+// ---- quick open
+function renderTiles(apps) {
+  const tiles = [], pcOnly = [];
+  for (const a of apps) for (const w of a.web) {
+    if (!w.exists) continue;
+    if (!w.phone) { pcOnly.push(`${w.label} (${w.pc.replace(/^http:\/\/|\/$/g, "")})`); continue; }
+    const t = el("a", "tile" + (w.up ? "" : " down"));
+    t.href = w.phone; t.target = "_blank"; t.rel = "noopener";
+    const title = el("div", "t"); title.append(el("span", "dot" + (w.up ? " on" : "")), el("span", null, w.label));
+    const port = new URL(w.phone).port;
+    t.append(title, el("div", "s", w.up ? (port ? `port ${port}` : "main address") : `${a.label} is off · tap to start`));
+    if (!w.up) t.onclick = (e) => { e.preventDefault(); if (!working(a)) act(a, "on"); };
+    tiles.push(t);
+  }
+  $("tiles").replaceChildren(...tiles);
+  $("pconly").textContent = pcOnly.length ? `Only on the PC: ${pcOnly.join(", ")}` : "";
+}
+
+// ---- apps
+function subline(a) {
+  const sub = el("div", "sub");
+  if (a.busy && a.busy.startsWith("error")) { sub.className += " err"; sub.textContent = a.busy; }
+  else if (working(a)) sub.textContent = a.busy[0].toUpperCase() + a.busy.slice(1) + "…";
+  else if (a.state === "partial") { sub.className += " warn"; sub.textContent = `${a.running}/${a.total} running · down: ${a.down.join(", ")}`; }
+  else if (a.state === "missing") sub.textContent = "Not created yet · flip to create";
+  else sub.textContent = (a.state === "on" ? `${a.total} container${a.total > 1 ? "s" : ""} · ` : "") + a.note;
+  return sub;
+}
+
+function containerItem(a, c) {
+  const it = el("div", "item");
+  const dot = el("span", "dot" + (!c.running ? "" : c.health === "unhealthy" ? " bad" : c.health === "starting" ? " warn" : " on"));
+  const info = el("div", "info");
+  info.append(el("div", "name", c.name));
+  const bits = [];
+  if (c.running) {
+    bits.push(`up ${ago(c.started)}`);
+    if (c.health) bits.push(c.health);
+    if (c.cpu) bits.push(`${c.cpu} CPU`);
+    if (c.mem) bits.push(c.mem);
+  } else {
+    bits.push(c.state + (c.exit ? ` (code ${c.exit})` : "") + (ago(c.finished) ? ` ${ago(c.finished)} ago` : ""));
+  }
+  if (c.restarts) bits.push(`${c.restarts} restarts`);
+  const sub = el("div", "sub", bits.join(" · "));
+  info.append(sub);
+  if (c.error) info.append(el("div", "sub err", c.error));
+  info.append(el("div", "sub mono", c.image));
+  const logs = el("button", "pill", "Logs"); logs.onclick = () => openLogs(c.name);
+  const rs = el("button", "pill", "Restart"); rs.disabled = working(a) || !c.running; rs.onclick = () => restartContainer(c.name);
+  it.append(dot, info, logs, rs);
+  return it;
+}
+
+function linkItem(w) {
+  const it = el("div", "item");
+  const info = el("div", "info");
+  info.append(el("div", "name", w.label));
+  const u = w.phone && new URL(w.phone);
+  info.append(el("div", "sub mono", u ? `Phone: ${u.protocol.slice(0, -1)} · ${u.port ? "port " + u.port : "main address"}` : "Phone: PC only"));
+  info.append(el("div", "sub mono", `PC: ${w.pc.replace(/^https?:\/\//, "")}`));
+  it.append(el("span", "dot" + (w.up ? " on" : "")), info);
+  if (w.phone) { const o = el("a", "pill blue", "Open"); o.href = w.phone; o.target = "_blank"; o.rel = "noopener"; it.append(o); }
+  return it;
+}
+
+function renderApps(apps) {
+  $("list").replaceChildren(...apps.map((a) => {
+    const li = el("li", "app" + (opened.has(a.id) ? " open" : ""));
+    const row = el("div", "row");
+    const ex = el("button", "expand");
+    ex.setAttribute("aria-expanded", opened.has(a.id));
+    const info = el("div", "info"); info.append(el("div", "name", a.label), subline(a));
+    ex.append(el("span", "chev", "›"), info);
+    ex.onclick = () => { opened.has(a.id) ? opened.delete(a.id) : opened.add(a.id); saveOpen(); render(); };
+    const sw = el("button", "sw" + (a.state === "on" || a.state === "partial" ? " " + a.state : "") + (working(a) ? " busy" : ""));
+    sw.setAttribute("role", "switch");
+    sw.setAttribute("aria-checked", a.state === "on" ? "true" : a.state === "partial" ? "mixed" : "false");
+    sw.setAttribute("aria-label", a.label);
+    sw.disabled = working(a);
+    // A lit switch (on, or partly on) turns the whole app off; a dark one turns it on.
+    sw.onclick = () => act(a, a.state === "on" || a.state === "partial" ? "off" : "on");
+    row.append(ex, sw);
+
+    const det = el("div", "detail");
+    const shown = a.web.filter((w) => w.exists);
+    if (shown.length) { const g = el("div", "group"); g.append(...shown.map(linkItem)); det.append(g); }
+    if (a.containers.length) { const g = el("div", "group"); g.append(...a.containers.map((c) => containerItem(a, c))); det.append(g); }
+    const acts = el("div", "actions");
+    const rs = el("button", "pill", "Restart app"); rs.disabled = working(a) || a.state === "off" || a.state === "missing"; rs.onclick = () => act(a, "restart");
+    const st = el("button", "pill red", "Stop app"); st.disabled = working(a) || a.state === "off" || a.state === "missing"; st.onclick = () => act(a, "off");
+    acts.append(rs, st);
+    det.append(acts);
+    li.append(row, det);
+    return li;
+  }));
+}
+
+function render() {
+  if (!state) return;
+  renderHost(state.host);
+  renderTiles(state.apps);
+  renderApps(state.apps);
+  const foot = [];
+  if (state.unlisted.length) foot.push(`Not in apps.yaml: ${state.unlisted.join(", ")}`);
+  $("foot").textContent = foot.join(" · ");
+}
+
+async function refresh() {
+  try {
+    const r = await fetch("/api/state", { cache: "no-store" });
+    if (!r.ok) throw new Error(r.status);
+    state = await r.json();
+    render();
+    $("offline").style.display = "none";
+    $("stamp").textContent = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+  } catch { $("offline").style.display = "block"; }
+}
+
+// ---- logs
+let logName = null;
+async function loadLogs() {
+  const pre = $("logtext");
+  const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+  try {
+    const r = await fetch(`/api/logs/${encodeURIComponent(logName)}?lines=${$("loglines").value}`, { cache: "no-store" });
+    pre.textContent = r.ok ? (await r.text()) || "(no output)" : `Couldn't load logs (${r.status}).`;
+  } catch { pre.textContent = "Couldn't reach the panel."; }
+  if (atBottom || !pre.dataset.loaded) pre.scrollTop = pre.scrollHeight;
+  pre.dataset.loaded = "1";
+}
+function openLogs(name) {
+  logName = name;
+  $("logtitle").textContent = name;
+  $("logtext").textContent = "Loading…"; delete $("logtext").dataset.loaded;
+  $("sheet").classList.add("show");
+  document.body.style.overflow = "hidden";
+  loadLogs();
+}
+$("logclose").onclick = () => { $("sheet").classList.remove("show"); document.body.style.overflow = ""; logName = null; };
+$("logrefresh").onclick = loadLogs;
+$("loglines").onchange = () => { delete $("logtext").dataset.loaded; loadLogs(); };
+
+$("all-on").onclick = async () => { await post("/api/apps/all/on"); refresh(); };
+$("all-off").onclick = async () => { if (confirm("Stop every app?")) { await post("/api/apps/all/off"); refresh(); } };
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+refresh();
+setInterval(() => { if (!document.hidden && !logName) refresh(); }, 3000);
+setInterval(() => { if (!document.hidden && logName) loadLogs(); }, 5000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+</script>
+</body>
+</html>

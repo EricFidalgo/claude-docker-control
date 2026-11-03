@@ -1,0 +1,50 @@
+# Copy this file to apps.yaml (which stays out of git) and list the Docker apps on your machine.
+# `dock` (terminal) and the phone panel (dock panel) both read apps.yaml; edit it to add an app.
+#
+# Each app is either:
+#   compose:    a docker compose project  -> dir, file, project (the project name Docker already uses)
+#   containers: standalone `docker run` containers -> list of container names
+# Optional `up:` is the command (run in `dir`) that creates the app if its containers don't exist yet.
+# Optional `after_start:` runs (in `dir`) after the app is started or restarted.
+# Optional `web:` lists the app's web pages by host port. The panel works out the phone and PC
+#   links itself from Docker's port bindings and `tailscale serve status`, so nothing here goes stale.
+#   Add `pc: tailnet` to an entry whose app only works on its tailnet address.
+#   To put a page on the phone: bind it to 127.0.0.1 in compose, then
+#   `tailscale serve --bg --https=<port> http://127.0.0.1:<port>` (tailnet only, HTTPS).
+# Starting/stopping keeps containers, volumes and data; nothing here deletes anything.
+#
+# Secrets stay in each project's own .env, never in this file.
+
+panel:
+  port: 9000          # listens on 127.0.0.1 only; `tailscale serve` exposes it to your tailnet
+  disks:
+    - {label: System, path: /}
+  # backup_status: /path/to/backups/status.json   # optional: shows the last backup on the panel
+
+apps:
+  movies:
+    label: Movies
+    note: Jellyfin media server
+    compose:
+      project: media-stack
+      dir: ~/media-stack
+      file: docker-compose.yml
+    web:
+      - {label: Jellyfin, port: 8096}
+
+  helper:
+    label: Helper
+    note: a standalone container started with docker run
+    containers: [helper]
+    web:
+      - {label: Helper, port: 8080}
+
+  atvloadly:
+    label: AtvLoadly
+    note: Apple TV sideloader (its compose file is in atvloadly/)
+    compose:
+      project: atvloadly
+      dir: ~/docker-master/atvloadly
+      file: compose.yaml
+    web:
+      - {label: AtvLoadly, port: 5533}

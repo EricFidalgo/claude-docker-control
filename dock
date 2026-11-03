@@ -1,0 +1,432 @@
+#!/usr/bin/env python3
+"""Turn the Docker apps in apps.yaml on and off, from the terminal or a phone-friendly web panel.
+
+  dock status                 show every app
+  dock urls                   every web page, with its phone and PC link
+  dock on      <app|all>      start (creates the app first if its containers don't exist)
+  dock off     <app|all>      stop (containers and data are kept)
+  dock restart <app|all>      restart
+  dock logs    <container> [lines]
+  dock panel                  serve the phone panel on 127.0.0.1:<panel.port>
+  dock password               set the panel's phone unlock password (also the way back in; turns Face ID off)
+
+The panel locks phone visits (those through `tailscale serve`) behind the password or Face ID; this PC
+needs no unlock. lock.py and lock.js are copies of the Money app's (finance_tracker/finance/), kept identical.
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+import yaml
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import lock  # noqa: E402
+
+# DOCK_PORT and DOCK_LOCK let a test copy of the panel run beside the real one.
+LOCK = lock.Lock(Path(os.environ.get("DOCK_LOCK") or HERE / "lock.json"), cookie="dock_lock", rp_name="Docker")
+
+# apps.yaml is this machine's own list and stays out of git; apps.example.yaml shows the format.
+if not (HERE / "apps.yaml").exists():
+    sys.exit(f"No apps.yaml yet. Copy {HERE / 'apps.example.yaml'} to apps.yaml and list your apps in it.")
+CONFIG = yaml.safe_load((HERE / "apps.yaml").read_text())
+APPS = CONFIG["apps"]
+PANEL = CONFIG.get("panel", {})
+PORT = int(os.environ.get("DOCK_PORT") or PANEL.get("port", 9000))
+
+
+def sh(args, cwd=None, check=True):
+    r = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
+    if check and r.returncode:
+        raise RuntimeError((r.stderr or r.stdout).strip().splitlines()[-1] if (r.stderr or r.stdout).strip() else f"exit {r.returncode}")
+    return r
+
+
+# ---- docker ------------------------------------------------------------------------------
+
+def inspect_all():
+    """Every container on the machine, as {name: info}. One `docker inspect` covers them all."""
+    ids = sh(["docker", "ps", "-aq"]).stdout.split()
+    if not ids:
+        return {}
+    out = {}
+    for c in json.loads(sh(["docker", "inspect", *ids]).stdout):
+        st = c["State"]
+        out[c["Name"].lstrip("/")] = {
+            "name": c["Name"].lstrip("/"),
+            "running": st["Status"] == "running",
+            "state": st["Status"],
+            "health": (st.get("Health") or {}).get("Status"),
+            "started": st["StartedAt"] if st["Status"] == "running" else None,
+            "finished": st["FinishedAt"] if st["Status"] != "running" else None,
+            "error": st.get("Error") or None,
+            "exit": st.get("ExitCode"),
+            "restarts": c.get("RestartCount", 0),
+            "image": c["Config"]["Image"],
+            "project": (c["Config"].get("Labels") or {}).get("com.docker.compose.project"),
+            # PortBindings survive a stop, unlike the live port list, so links work while an app is off.
+            "binds": {int(b["HostPort"]): b["HostIp"] or "0.0.0.0"
+                      for bs in (c["HostConfig"].get("PortBindings") or {}).values() for b in bs or [] if b.get("HostPort")},
+        }
+    return out
+
+
+def members(app, every):
+    spec = APPS[app]
+    if "compose" in spec:
+        return [c for c in every.values() if c["project"] == spec["compose"]["project"]]
+    return [every[n] for n in spec["containers"] if n in every]
+
+
+def status(app, every=None):
+    cs = members(app, every if every is not None else inspect_all())
+    up = sum(c["running"] for c in cs)
+    state = "missing" if not cs else "on" if up == len(cs) else "off" if up == 0 else "partial"
+    return {"state": state, "running": up, "total": len(cs), "down": [c["name"] for c in cs if not c["running"]]}
+
+
+def compose_cmd(spec):
+    c = spec["compose"]
+    d = os.path.expanduser(c["dir"])
+    return ["docker", "compose", "-p", c["project"], "--project-directory", d, "-f", os.path.join(d, c["file"])], d
+
+
+def app_dir(spec):
+    return compose_cmd(spec)[1] if "compose" in spec else None
+
+
+def turn(app, action):
+    """action: on | off | restart"""
+    spec = APPS[app]
+    if "containers" in spec:
+        sh(["docker", {"on": "start", "off": "stop", "restart": "restart"}[action], *spec["containers"]])
+    else:
+        base, d = compose_cmd(spec)
+        if action == "off":
+            sh([*base, "stop"])
+        elif action == "restart":
+            sh([*base, "restart"])
+        elif members(app, inspect_all()):
+            sh([*base, "start"])
+        elif "up" in spec:
+            sh(["bash", "-c", spec["up"]], cwd=d)
+        else:
+            sh([*base, "up", "-d"])
+    if action != "off" and "after_start" in spec:
+        sh(["bash", "-c", os.path.expanduser(spec["after_start"])], cwd=app_dir(spec))
+
+
+def owner(container, every):
+    """The app a container belongs to, or None."""
+    return next((a for a in APPS if any(c["name"] == container for c in members(a, every))), None)
+
+
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def logs(container, lines=200):
+    r = sh(["docker", "logs", "--tail", str(lines), "--timestamps", container], check=False)
+    return ANSI.sub("", r.stdout + r.stderr)
+
+
+def resolve(name):
+    if name == "all":
+        return list(APPS)
+    if name not in APPS:
+        sys.exit(f"unknown app '{name}'. Known: {', '.join(APPS)}")
+    return [name]
+
+
+# ---- tailscale + links -------------------------------------------------------------------
+
+_ts = {"at": 0.0, "host": None, "ips": [], "serve": {}}
+
+
+def tailscale():
+    """{host, ips, serve: {local port: https url}}, refreshed every 15 s. If the CLI fails (tailscaled
+    still starting after a boot) the last good answer stays, and with none yet it retries on every call."""
+    if _ts["host"] and time.time() - _ts["at"] < 15:
+        return _ts
+    try:
+        me = json.loads(sh(["tailscale", "status", "--json"]).stdout)["Self"]
+        host, ips, serve = me["DNSName"].rstrip("."), me.get("TailscaleIPs", []), {}
+        web = json.loads(sh(["tailscale", "serve", "status", "--json"]).stdout or "{}").get("Web") or {}
+        for hostport, cfg in web.items():
+            target = urlparse(((cfg.get("Handlers") or {}).get("/") or {}).get("Proxy", ""))
+            if target.port and target.hostname in ("127.0.0.1", "localhost", *ips):
+                serve[target.port] = "https://" + hostport.removesuffix(":443") + "/"
+        _ts.update(at=time.time(), host=host, ips=ips, serve=serve)
+    except Exception:
+        pass
+    return _ts
+
+
+def links(app, every):
+    """Each web page of the app with the URL to use on the phone (None if PC only) and on the PC."""
+    ts, cs = tailscale(), members(app, every)
+    out = []
+    for w in APPS[app].get("web", []):
+        port = int(w["port"])
+        holder = next((c for c in cs if port in c["binds"]), None)
+        bind = holder["binds"][port] if holder else None
+        phone = ts["serve"].get(port)
+        if not phone and ts["host"] and bind in ("0.0.0.0", *ts["ips"]):
+            phone = f"http://{ts['host']}:{port}/"
+        pc = f"http://{'localhost' if bind in (None, '0.0.0.0', '127.0.0.1') else bind}:{port}/"
+        if w.get("pc") == "tailnet" and phone:  # the app only works on its tailnet address
+            pc = phone
+        out.append({"label": w["label"], "port": port, "phone": phone, "pc": pc,
+                    "up": bool(holder and holder["running"]), "exists": holder is not None})
+    return out
+
+
+# ---- host stats --------------------------------------------------------------------------
+
+_cpu = {"prev": None}
+
+
+def cpu_percent():
+    """Busy share of all cores since the previous call."""
+    vals = list(map(int, Path("/proc/stat").read_text().split("\n", 1)[0].split()[1:]))
+    idle, total = vals[3] + vals[4], sum(vals)
+    prev, _cpu["prev"] = _cpu["prev"], (idle, total)
+    if not prev or total == prev[1]:
+        return None
+    return round(100 * (1 - (idle - prev[0]) / (total - prev[1])), 1)
+
+
+def backup_stats():
+    """How old the last good backup is, or None if apps.yaml names no status file."""
+    path = PANEL.get("backup_status")
+    if not path:
+        return None
+    try:
+        path = Path(path).expanduser()
+        return {"age": time.time() - path.stat().st_mtime, "warnings": len(json.loads(path.read_text())["warnings"])}
+    except (OSError, ValueError, KeyError):
+        return {"age": None, "warnings": 0}
+
+
+def host_stats():
+    mem = {l.split(":")[0]: int(l.split()[1]) * 1024 for l in Path("/proc/meminfo").read_text().splitlines()}
+    disks = []
+    for d in PANEL.get("disks", [{"label": "System", "path": "/"}]):
+        try:
+            u = shutil.disk_usage(d["path"])
+            disks.append({"label": d["label"], "used": u.used, "total": u.total})
+        except OSError:
+            pass
+    return {
+        "name": os.uname().nodename,
+        "uptime": float(Path("/proc/uptime").read_text().split()[0]),
+        "load": os.getloadavg(),
+        "cores": os.cpu_count(),
+        "cpu": cpu_percent(),
+        "mem": {"used": mem["MemTotal"] - mem["MemAvailable"], "total": mem["MemTotal"]},
+        "disks": disks,
+        "tailscale": tailscale()["host"],
+        "backup": backup_stats(),
+    }
+
+
+# Per-container CPU and memory. `docker stats` takes ~2 s, so a background thread keeps it fresh,
+# but only while someone has the panel open.
+stats = {}
+last_poll = [0.0]
+
+
+def stats_loop():
+    while True:
+        if time.time() - last_poll[0] < 20:
+            r = sh(["docker", "stats", "--no-stream", "--format", "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"], check=False)
+            fresh = {}
+            for line in r.stdout.splitlines():
+                name, cpu, mem = line.split("\t")
+                fresh[name] = {"cpu": cpu, "mem": mem.split(" / ")[0]}
+            stats.clear(); stats.update(fresh)
+        time.sleep(4)
+
+
+# ---- phone panel ---------------------------------------------------------------------------
+
+busy = {}  # app -> "starting" | "stopping" | "restarting" | "restarting <container>" | "error: ..."
+
+
+def in_progress(app):
+    return bool(busy.get(app)) and not busy[app].startswith("error")
+
+
+def run_in_background(app, label, work):
+    if in_progress(app):
+        return False
+    busy[app] = label
+
+    def go():
+        try:
+            work()
+            busy.pop(app, None)
+        except Exception as e:  # shown in the panel until the next action
+            busy[app] = f"error: {e}"
+
+    threading.Thread(target=go, daemon=True).start()
+    return True
+
+
+VERB = {"on": "starting", "off": "stopping", "restart": "restarting"}
+
+
+def snapshot():
+    every = inspect_all()
+    rows, claimed = [], set()
+    for app, spec in APPS.items():
+        cs = members(app, every)
+        claimed.update(c["name"] for c in cs)
+        rows.append({
+            "id": app, "label": spec.get("label", app), "note": spec.get("note", ""),
+            **status(app, every), "busy": busy.get(app), "web": links(app, every),
+            "containers": [{**{k: c[k] for k in ("name", "running", "state", "health", "started", "finished",
+                                                  "error", "exit", "restarts", "image")}, **stats.get(c["name"], {})}
+                           for c in sorted(cs, key=lambda c: c["name"])],
+        })
+    return {"host": host_stats(), "apps": rows, "unlisted": sorted(set(every) - claimed)}
+
+
+ICON = HERE / "icon.png"
+MANIFEST = json.dumps({"name": "Docker", "short_name": "Docker", "start_url": "/", "display": "standalone",
+                       "background_color": "#000000", "theme_color": "#000000",
+                       "icons": [{"src": "/icon.png", "sizes": "180x180", "type": "image/png"}]})
+
+
+class Panel(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def log_request(self, code="-", size="-"):
+        if self.path == "/api/state" and code == 200:
+            return
+        print(f"{self.command} {self.path} {code} host={self.headers.get('Host')} ua={self.headers.get('User-Agent', '')[:70]}", flush=True)
+
+    def reply(self, code, body, ctype="application/json", cookie=None):
+        data = body if isinstance(body, bytes) else body.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        if cookie:
+            self.send_header("Set-Cookie", cookie)
+        self.end_headers()
+        self.wfile.write(data)
+
+    def guarded(self):
+        """Answers the request here if the lock owns it: /api/auth*, or an API call from a locked phone."""
+        path = urlparse(self.path).path
+        if path == lock.AUTH_PREFIX or path.startswith(lock.AUTH_PREFIX + "/"):
+            try:
+                size = min(max(int(self.headers.get("Content-Length") or 0), 0), 64_000)
+            except ValueError:
+                size = 0
+            status, body, cookie = LOCK.handle(self.command, path, self.headers, self.rfile.read(size))
+            self.reply(status, json.dumps(body), cookie=cookie)
+            return True
+        if LOCK.blocks(path, self.headers):
+            self.reply(401, json.dumps({"locked": True}))
+            return True
+        return False
+
+    def host_ok(self):
+        # Exact names only, so a DNS-rebinding page can't talk to the panel.
+        host = self.headers.get("Host", "").rsplit(":", 1)[0]
+        return host in ("127.0.0.1", "localhost", tailscale()["host"])
+
+    def do_GET(self):
+        if not self.host_ok():
+            return self.reply(403, "{}")
+        if self.guarded():
+            return
+        url = urlparse(self.path)
+        parts = url.path.strip("/").split("/")
+        if url.path == "/api/state":
+            last_poll[0] = time.time()
+            return self.reply(200, json.dumps(snapshot()))
+        if len(parts) == 3 and parts[:2] == ["api", "logs"] and owner(parts[2], inspect_all()):
+            n = min(max(int((parse_qs(url.query).get("lines") or ["300"])[0]), 50), 2000)
+            return self.reply(200, logs(parts[2], n), "text/plain; charset=utf-8")
+        if url.path in ("/", "/index.html"):
+            return self.reply(200, (HERE / "panel.html").read_bytes(), "text/html; charset=utf-8")
+        if url.path == "/icon.png" and ICON.exists():
+            return self.reply(200, ICON.read_bytes(), "image/png")
+        if url.path == "/lock.js":
+            return self.reply(200, (HERE / "lock.js").read_bytes(), "text/javascript; charset=utf-8")
+        if url.path == "/sw.js":
+            return self.reply(200, (HERE / "sw.js").read_bytes(), "text/javascript; charset=utf-8")
+        if url.path == "/manifest.webmanifest":
+            return self.reply(200, MANIFEST, "application/manifest+json")
+        self.reply(404, "{}")
+
+    def do_POST(self):
+        # Custom header forces a CORS preflight, which this server never answers, so other
+        # websites open in a browser on this PC can't toggle anything.
+        if not self.host_ok():
+            return self.reply(403, "{}")
+        if self.guarded():  # the lock's own POSTs carry X-Lock instead, checked in lock.py
+            return
+        if self.headers.get("X-Dock") != "1":
+            return self.reply(403, "{}")
+        parts = self.path.strip("/").split("/")
+        # api/apps/<id|all>/<on|off|restart>
+        if len(parts) == 4 and parts[:2] == ["api", "apps"] and parts[3] in VERB:
+            if parts[2] == "all" or parts[2] in APPS:
+                act = parts[3]
+                started = [run_in_background(n, VERB[act], lambda n=n: turn(n, act)) for n in resolve(parts[2])]
+                return self.reply(202 if any(started) else 409, "{}")
+        # api/containers/<name>/restart
+        if len(parts) == 4 and parts[:2] == ["api", "containers"] and parts[3] == "restart":
+            app = owner(parts[2], inspect_all())
+            if app:
+                ok = run_in_background(app, f"restarting {parts[2]}", lambda: sh(["docker", "restart", parts[2]]))
+                return self.reply(202 if ok else 409, "{}")
+        self.reply(404, "{}")
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    if cmd == "panel":
+        threading.Thread(target=stats_loop, daemon=True).start()
+        print(f"panel on http://127.0.0.1:{PORT}", flush=True)
+        ThreadingHTTPServer(("127.0.0.1", PORT), Panel).serve_forever()
+    elif cmd == "status":
+        every = inspect_all()
+        for app in APPS:
+            s = status(app, every)
+            print(f"{app:16} {s['state']:8} {s['running']}/{s['total']}" + (f"  down: {', '.join(s['down'])}" if s["down"] else ""))
+    elif cmd == "urls":
+        every = inspect_all()
+        for app in APPS:
+            for l in links(app, every):
+                print(f"{l['label']:16} {'up  ' if l['up'] else 'off '} phone: {l['phone'] or '(PC only)':42} pc: {l['pc']}")
+        ts = tailscale()
+        if ts["host"]:
+            print(f"{'This panel':16}      phone: {ts['serve'].get(PORT, '(not served)')}")
+    elif cmd in VERB and len(sys.argv) == 3:
+        for app in resolve(sys.argv[2]):
+            print(f"{cmd} {app} ...", flush=True)
+            turn(app, cmd)
+    elif cmd == "password":
+        lock.main([str(LOCK.path)])
+        print("The panel picks it up straight away; no restart needed.")
+    elif cmd == "logs" and len(sys.argv) in (3, 4):
+        print(logs(sys.argv[2], int(sys.argv[3]) if len(sys.argv) == 4 else 200), end="")
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main()

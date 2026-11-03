@@ -1,0 +1,19 @@
+# AtvLoadly: sideloads apps onto the Apple TV. Web page on 127.0.0.1:5533 (tailscale serve puts it on the phone).
+# Its data (Apple TV pairing, accounts, IPAs) lives in ./data, which the nightly backup covers.
+# The host's avahi and dbus sockets let it find and pair with the Apple TV on the LAN.
+name: atvloadly
+
+services:
+  atvloadly:
+    image: bitxeno/atvloadly:v0.8.0
+    container_name: atvloadly
+    restart: unless-stopped
+    # Without this, AppArmor blocks the dbus calls above and Apple TV discovery never starts.
+    security_opt:
+      - apparmor=unconfined
+    ports:
+      - "127.0.0.1:5533:80"
+    volumes:
+      - ./data:/data
+      - /var/run/dbus:/var/run/dbus
+      - /var/run/avahi-daemon:/var/run/avahi-daemon
