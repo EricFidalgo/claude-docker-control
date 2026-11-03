@@ -8,7 +8,7 @@
   dock restart <app|all>      restart
   dock logs    <container> [lines]
   dock panel                  serve the phone panel on 127.0.0.1:<panel.port>
-  dock password               set the panel's phone unlock password (also the way back in; turns Face ID off)
+  dock password               set the panel's phone unlock password, 6+ numbers (also the way back in; turns Face ID off)
 
 The panel locks phone visits (those through `tailscale serve`) behind the password or Face ID; this PC
 needs no unlock. lock.py and lock.js are copies of the Money app's (finance_tracker/finance/), kept identical.
