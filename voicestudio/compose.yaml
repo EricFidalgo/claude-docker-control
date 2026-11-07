@@ -1,0 +1,52 @@
+# VoiceStudio (OmniVoice) in Docker: the same engine as the desktop app, headless, so it can be started
+# from the phone panel or by Claude (`dock on voicestudio`) while you're away.
+# The app itself is on 127.0.0.1:3903 (container port 3900); the desktop app owns host port 3900, so don't reuse it.
+# Open it at http://localhost:3901, not 3903: that's gate.py (service voicestudio-gate), which adds the API key so the
+# page never asks for it, and puts the phone lock in front of phone visits (tailscale serve 3901 -> 127.0.0.1:3901).
+# Claude's VoiceStudio tools talk to 3903 directly with their own copy of the key (rotate-key.sh keeps them in step).
+# The API key (OMNIVOICE_API_KEY) lives in the secrets folder, file env/voicestudio.env.
+# Only one copy should hold models on the GPU at a time (8 GB card): close the desktop app before using this.
+# GPU: plain device and library mounts, like media-stack, because nvidia-container-toolkit needs sudo to install.
+# Models and voices live in the omnivoice-data volume.
+# Phone layout: mobile/ holds a stylesheet and script that patch-ui.sh adds to the stock page at start (desktop unchanged).
+name: voicestudio
+
+services:
+  omnivoice:
+    image: palashdeb/omnivoice-studio:stable
+    container_name: omnivoice
+    env_file:
+      - ${HOME}/.claude-secrets/env/voicestudio.env
+    restart: unless-stopped
+    entrypoint: ["sh", "/app/frontend/dist/assets/vs-mobile/patch-ui.sh"]
+    ports:
+      - "127.0.0.1:3903:3900"
+    environment:
+      - OMNIVOICE_BIND_HOST=0.0.0.0
+      - OMNIVOICE_DATA_DIR=/app/omnivoice_data
+      - HF_HOME=/app/omnivoice_data/huggingface
+      # Free the GPU after 5 idle minutes (default 10) so the desktop app can have the card back sooner.
+      - OMNIVOICE_ENGINE_IDLE_UNLOAD_SECONDS=300
+      # The app runs as you (uid 1000) but HOME would still be /root, so saving settings (~/.config/omnivoice/env)
+      # and the watermark model (~/.cache/audioseal) failed with "Permission denied". Give it a home it can write to.
+      - HOME=/app/omnivoice_data/container-home
+    volumes:
+      # Same folder the desktop app uses, so both see the same voices (old omnivoice-data volume kept as a backup).
+      - ${HOME}/.omnivoice:/app/omnivoice_data
+      # Whole folder, not single files: a file mount keeps serving the old copy once an editor replaces the file.
+      # Served without the API key (it sits under /assets/), so only the layout files and patch-ui.sh go in it.
+      - ./mobile:/app/frontend/dist/assets/vs-mobile:ro
+      # Reuse the models the desktop app already downloaded (host HF cache), so nothing is downloaded twice.
+      - ${HOME}/.cache/huggingface/hub:/app/omnivoice_data/huggingface/hub
+      - /lib/x86_64-linux-gnu/libcuda.so.1:/usr/lib/x86_64-linux-gnu/libcuda.so.1:ro
+      - /lib/x86_64-linux-gnu/libnvidia-ml.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
+      - /lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1:ro
+      - /lib/x86_64-linux-gnu/libnvidia-nvvm.so.4:/usr/lib/x86_64-linux-gnu/libnvidia-nvvm.so.4:ro
+    devices:
+      - /dev/nvidia0:/dev/nvidia0
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvidia-uvm:/dev/nvidia-uvm
+      - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
+
+volumes:
+  omnivoice-data:

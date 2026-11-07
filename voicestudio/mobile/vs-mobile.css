@@ -1,0 +1,178 @@
+/* VoiceStudio phone layout. Injected into the stock web UI by patch-ui.sh; desktop widths are untouched.
+   Hooks are the app's own data-slot attributes and stable class names, not Tailwind utility classes.
+   Shares the 767px breakpoint, those hooks and the --vs-* properties with vs-mobile.js: change both together. */
+
+@media (max-width: 767px) {
+  :root {
+    --vs-tabbar: 56px;
+    --vs-safe-b: env(safe-area-inset-bottom, 0px);
+    --vs-bottom: calc(var(--vs-tabbar) + var(--vs-safe-b));
+  }
+
+  /* Leave room under everything for the bottom tab bar. */
+  [data-slot="studio-workspace"] .app-surface { padding-bottom: var(--vs-bottom); }
+
+  /* ---------- Icon rail -> bottom tab bar ---------- */
+  aside.brand-sidebar {
+    position: fixed !important;
+    inset: auto 0 0 0 !important;
+    z-index: 45;
+    width: 100% !important;
+    height: var(--vs-bottom) !important;
+    padding-bottom: var(--vs-safe-b);
+    display: flex !important;
+    flex-direction: row;
+    align-items: stretch;
+    border-right: 0 !important;
+    border-top: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
+    box-shadow: 0 -8px 24px rgb(0 0 0 / 0.25);
+  }
+  /* Logo row, and the footer's speed/quality and engine-status buttons (models are also under Settings > Models). */
+  aside.brand-sidebar > [data-slot="titlebar-row"],
+  aside.brand-sidebar > footer { display: none !important; }
+  aside.brand-sidebar > nav {
+    flex: 1 1 auto;
+    display: flex !important;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-around;
+    gap: 0;
+    padding: 0 4px !important;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  aside.brand-sidebar > nav > * { margin: 0 !important; }
+  aside.brand-sidebar .workspace-nav-item {
+    flex: 0 0 auto;
+    width: 42px !important;
+    height: 44px !important;
+    justify-content: center;
+    padding: 0 !important;
+  }
+  /* Labeled ("expanded") rail mode: keep icons only. */
+  aside.brand-sidebar .workspace-nav-item > :not(svg):not(:first-child) { display: none !important; }
+  /* Settings link block at the end of the bar. */
+  aside.brand-sidebar > div:last-child {
+    flex: 0 0 auto;
+    flex-direction: row !important;
+    align-items: center;
+    justify-content: center;
+    border-top: 0 !important;
+    border-left: 1px solid color-mix(in oklab, var(--border) 50%, transparent);
+    padding: 0 6px !important;
+  }
+
+  /* The rail's expand toggle makes no sense on a phone. */
+  main header.workspace-titlebar > button[aria-label="Toggle Sidebar"] { display: none !important; }
+
+  /* ---------- Secondary pane -> drawer ---------- */
+  aside[data-slot="secondary-sidebar"]:not([data-collapsed]) {
+    position: fixed !important;
+    top: 0;
+    left: 0;
+    bottom: var(--vs-bottom);
+    z-index: 50;
+    width: min(88vw, 360px) !important;
+    max-height: none !important;
+    border-right: 1px solid var(--border) !important;
+    border-bottom: 0 !important;
+    background: var(--background) !important;
+    box-shadow: 0 0 0 100vmax rgb(0 0 0 / 0.55), 8px 0 32px rgb(0 0 0 / 0.4);
+    animation: vs-drawer-in 180ms cubic-bezier(.2, .8, .2, 1);
+  }
+  @keyframes vs-drawer-in { from { transform: translateX(-24px); opacity: 0.4; } }
+  @media (prefers-reduced-motion: reduce) {
+    aside[data-slot="secondary-sidebar"]:not([data-collapsed]) { animation: none; }
+  }
+  /* Resize handle is mouse-only. */
+  aside[data-slot="secondary-sidebar"] { --pane-resize-display: none !important; }
+
+  /* Collapsed pane: no strip, just a pill button in the header's top-left corner. */
+  aside[data-slot="secondary-sidebar"][data-collapsed] {
+    position: fixed !important;
+    top: 0;
+    left: 0;
+    z-index: 30;
+    width: auto !important;
+    height: 48px;
+    border: 0 !important;
+    background: transparent !important;
+    overflow: visible;
+    container-type: normal !important; /* inline-size containment would size it to 0 */
+  }
+  aside[data-slot="secondary-sidebar"][data-collapsed] > [data-slot="secondary-sidebar-header"] { display: none !important; }
+  aside[data-slot="secondary-sidebar"][data-collapsed] > [data-slot="secondary-sidebar-expand"] {
+    flex: 0 0 auto;
+    flex-direction: row;
+    margin: 8px 0 0 10px;
+    height: 32px;
+    padding: 0 10px 0 3px;
+    gap: 6px;
+    border: 1px solid color-mix(in oklab, var(--border) 70%, transparent);
+    border-radius: 999px;
+    background: color-mix(in oklab, var(--muted) 35%, var(--background));
+    color: var(--foreground);
+  }
+  aside[data-slot="secondary-sidebar"][data-collapsed] > [data-slot="secondary-sidebar-expand"] > span:first-child {
+    width: 26px; height: 26px; border-radius: 999px;
+  }
+  aside[data-slot="secondary-sidebar"][data-collapsed] > [data-slot="secondary-sidebar-expand"] > span + span {
+    writing-mode: horizontal-tb !important;
+    font-size: 12px;
+  }
+  aside[data-slot="secondary-sidebar"][data-collapsed] > [data-slot="secondary-sidebar-expand"] > svg { display: none; }
+  /* Make room for the pill in whatever header sits at the top. */
+  body:has(aside[data-slot="secondary-sidebar"][data-collapsed]) main header.workspace-titlebar {
+    padding-left: var(--vs-pill-w, 104px) !important;
+  }
+
+  /* ---------- Header ---------- */
+  main header.workspace-titlebar {
+    padding-left: 12px !important;
+    padding-right: calc(var(--vs-corner-w, 36px) + 10px) !important;
+    gap: 8px !important;
+  }
+  /* Notification bell / account corner: fixed at right:148px for the desktop header; pin it to the edge. */
+  [data-slot="account-corner"] { left: auto !important; right: 6px !important; }
+  /* Long text buttons in the header give way before the page title does. */
+  main header.workspace-titlebar h1 { flex-shrink: 0; max-width: 46vw; }
+  main header.workspace-titlebar [data-slot="button"] { min-width: 0; max-width: 100%; flex-shrink: 1; overflow: hidden; justify-content: flex-start; }
+  main header.workspace-titlebar kbd { display: none; }
+  main header.workspace-titlebar div { min-width: 0; }
+  /* GitHub-star and support links: no room for them on a phone. */
+  main header.workspace-titlebar .github-star-shortcut,
+  main header.workspace-titlebar .support-shortcut { display: none !important; }
+
+  /* ---------- Settings: section list -> scrolling chip strip above the page ---------- */
+  main div:has(> aside nav[aria-label="Settings"]) { flex-direction: column !important; }
+  main aside:has(nav[aria-label="Settings"]) {
+    width: 100% !important;
+    flex: 0 0 auto !important;
+    border-right: 0 !important;
+    border-bottom: 1px solid color-mix(in oklab, var(--border) 50%, transparent);
+  }
+  main aside:has(nav[aria-label="Settings"]) > header,
+  main aside:has(nav[aria-label="Settings"]) > :not(header):not(:has(nav)) { display: none !important; }
+  main aside:has(nav[aria-label="Settings"]) > div:has(nav) {
+    flex-direction: row !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    padding: 8px 10px !important;
+    margin-right: calc(var(--vs-corner-w, 36px) + 8px); /* chips stop short of the fixed bell */
+    scrollbar-width: none;
+  }
+  main aside:has(nav[aria-label="Settings"]) > div:has(nav) > :not(nav) { display: none !important; }
+  main nav[aria-label="Settings"] { flex-direction: row !important; gap: 4px !important; }
+  main nav[aria-label="Settings"] > * { flex: 0 0 auto !important; width: auto !important; padding-inline: 10px 12px !important; }
+  main nav[aria-label="Settings"] [data-slot="settings-nav-label"] { overflow: visible; text-overflow: clip; }
+
+  /* ---------- Touch ergonomics ---------- */
+  /* iOS zooms into any focused field under 16px. */
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  textarea, select { font-size: 16px !important; }
+}
+
+/* Hover-only controls (row actions etc.) have no hover on a touch screen, at any width: show them. */
+@media (hover: none) {
+  [class*="group-hover"][class*="opacity-0"] { opacity: 1 !important; }
+}

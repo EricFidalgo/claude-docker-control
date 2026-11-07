@@ -62,6 +62,7 @@
   .sub { color:var(--muted); font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .sub.err { color:var(--bad); white-space:normal; }
   .sub.warn { color:var(--warn); }
+  .sub.upd, .sub .upd { color:var(--link); }
   button.sw { position:relative; width:56px; height:34px; flex:none; border:0; border-radius:17px; background:var(--off); transition:background .2s; padding:0; cursor:pointer; }
   button.sw::after { content:""; position:absolute; top:2px; left:2px; width:30px; height:30px; border-radius:50%; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.3); transition:transform .2s; }
   button.sw.on { background:var(--on); }
@@ -141,17 +142,32 @@ function localStorageGet(k) { try { return localStorage.getItem(k); } catch { re
 function saveOpen() { try { localStorage.setItem("dock.open", JSON.stringify([...opened])); } catch {} }
 
 const gb = (b) => { const g = b / 1024 ** 3; return g >= 1000 ? (g / 1024).toFixed(1) + " TB" : (g >= 100 ? g.toFixed(0) : g.toFixed(1)) + " GB"; };
+const size = (b) => b < 1024 ** 3 ? `${Math.round(b / 1024 ** 2)} MB` : gb(b);
 function ago(iso) {
   if (!iso || iso.startsWith("0001")) return "";
   let s = Math.max(0, (Date.now() - new Date(iso)) / 1000);
   const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
   return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : m ? `${m}m` : `${Math.floor(s)}s`;
 }
+// Image ages run to years, where "454d 21h" says less than "1 year".
+function longAgo(iso) {
+  const d = (Date.now() - new Date(iso)) / 86400000;
+  if (d < 60) return ago(iso);
+  if (d < 365) return `${Math.round(d / 30)} months`;
+  const y = Math.round(d / 36.5) / 10;
+  return `${y} year${y === 1 ? "" : "s"}`;
+}
 const working = (a) => !!a.busy && !a.busy.startsWith("error");
 
 async function act(app, action) {
   if (action === "off" && !confirm(`Stop ${app.label}?`)) return;
   if (action === "restart" && !confirm(`Restart ${app.label}?`)) return;
+  // GPU apps share the card's memory; a second one can run either out of it.
+  if (action === "on" && app.gpu_clash.length &&
+      !confirm(`${app.gpu_clash.join(" and ")} ${app.gpu_clash.length > 1 ? "are" : "is"} already on the GPU (${gpuLine(state.host.gpu)}). ` +
+               `${app.label} uses it too, and both may not fit. Start ${app.label} anyway?`)) return;
+  if (action === "update" && !confirm(`Update ${app.label}? This downloads the newer image for ${app.updates.join(", ")} ` +
+                                      `and recreates its containers. Data and settings are kept.`)) return;
   const r = await post(`/api/apps/${app.id}/${action}`);
   if (r.status === 409) alert(`${app.label} is still busy. Try again in a few seconds.`);
   refresh();
@@ -178,10 +194,27 @@ function renderHost(h) {
   const grid = el("div", "host");
   grid.append(stat("CPU", h.cpu == null ? "…" : `${h.cpu}%`, h.cpu ?? 0));
   grid.append(stat("Memory", `${gb(h.mem.used)} / ${gb(h.mem.total)}`, 100 * h.mem.used / h.mem.total));
+  if (h.gpu) grid.append(stat("GPU", `${size(h.gpu.used)} / ${gb(h.gpu.total)}`, 100 * h.gpu.used / h.gpu.total));
   for (const d of h.disks) grid.append(stat(d.label, `${gb(d.total - d.used)} free`, 100 * d.used / d.total));
   const up = ago(new Date(Date.now() - h.uptime * 1000).toISOString());
   const line = el("div", "hostline", `${h.name} · up ${up} · load ${h.load.map((x) => x.toFixed(2)).join(" ")} · ${h.cores} cores`);
-  $("host").replaceChildren(grid, line, ...backupLine(h.backup));
+  const lines = [line];
+  if (h.gpu) {
+    const extra = [h.gpu.util != null && `${h.gpu.util}% busy`, h.gpu.temp != null && `${h.gpu.temp}°C`].filter(Boolean);
+    lines.push(el("div", "hostline", [`GPU: ${gpuLine(h.gpu)}`, ...extra].join(" · ")));
+  }
+  if (h.docker) {
+    const d = h.docker, bits = [`Docker: ${gb(d.images)} of images`];
+    // Unique size: what removing them frees. Layers they share with images in use stay.
+    if (d.unused) bits.push(`${d.unused} unused (removing frees ~${size(d.unused_bytes)})`);
+    if (d.cache > 100 * 1024 ** 2) bits.push(`${size(d.cache)} build cache`);
+    lines.push(el("div", "hostline", bits.join(" · ")));
+  }
+  $("host").replaceChildren(grid, ...lines, ...backupLine(h.backup));
+}
+function gpuLine(g) {
+  if (!g || !g.users.length) return "nothing loaded";
+  return g.users.map((u) => `${u.label} ${size(u.mem)}`).join(", ");
 }
 // The backup timer runs nightly, so past 36 hours a run has been missed or has failed.
 function backupLine(b) {
@@ -218,7 +251,10 @@ function subline(a) {
   else if (working(a)) sub.textContent = a.busy[0].toUpperCase() + a.busy.slice(1) + "…";
   else if (a.state === "partial") { sub.className += " warn"; sub.textContent = `${a.running}/${a.total} running · down: ${a.down.join(", ")}`; }
   else if (a.state === "missing") sub.textContent = "Not created yet · flip to create";
-  else sub.textContent = (a.state === "on" ? `${a.total} container${a.total > 1 ? "s" : ""} · ` : "") + a.note;
+  else {
+    sub.textContent = (a.state === "on" ? `${a.total} container${a.total > 1 ? "s" : ""} · ` : "") + a.note;
+    if (a.updates.length && a.can_update) sub.prepend(el("span", "upd", "Update available · "));
+  }
   return sub;
 }
 
@@ -241,6 +277,8 @@ function containerItem(a, c) {
   info.append(sub);
   if (c.error) info.append(el("div", "sub err", c.error));
   info.append(el("div", "sub mono", c.image));
+  if (c.built) info.append(el("div", "sub", `Image built ${longAgo(c.built)} ago`));
+  if (c.update) info.append(el("div", "sub upd", "Newer image available"));
   const logs = el("button", "pill", "Logs"); logs.onclick = () => openLogs(c.name);
   const rs = el("button", "pill", "Restart"); rs.disabled = working(a) || !c.running; rs.onclick = () => restartContainer(c.name);
   it.append(dot, info, logs, rs);
@@ -284,6 +322,10 @@ function renderApps(apps) {
     const acts = el("div", "actions");
     const rs = el("button", "pill", "Restart app"); rs.disabled = working(a) || a.state === "off" || a.state === "missing"; rs.onclick = () => act(a, "restart");
     const st = el("button", "pill red", "Stop app"); st.disabled = working(a) || a.state === "off" || a.state === "missing"; st.onclick = () => act(a, "off");
+    if (a.updates.length && a.can_update) {
+      const up = el("button", "pill blue", "Update"); up.disabled = working(a); up.onclick = () => act(a, "update");
+      acts.append(up);
+    }
     acts.append(rs, st);
     det.append(acts);
     li.append(row, det);
@@ -298,6 +340,8 @@ function render() {
   renderApps(state.apps);
   const foot = [];
   if (state.unlisted.length) foot.push(`Not in apps.yaml: ${state.unlisted.join(", ")}`);
+  const checked = state.host.updates_checked;
+  foot.push(checked ? `Image updates checked ${ago(new Date(checked * 1000).toISOString())} ago` : "Image updates not checked yet");
   $("foot").textContent = foot.join(" · ");
 }
 
@@ -336,7 +380,11 @@ $("logclose").onclick = () => { $("sheet").classList.remove("show"); document.bo
 $("logrefresh").onclick = loadLogs;
 $("loglines").onchange = () => { delete $("logtext").dataset.loaded; loadLogs(); };
 
-$("all-on").onclick = async () => { await post("/api/apps/all/on"); refresh(); };
+$("all-on").onclick = async () => {
+  const gpuApps = (state?.apps || []).filter((a) => a.gpu).map((a) => a.label);
+  if (gpuApps.length > 1 && !confirm(`Start all turns on ${gpuApps.join(" and ")}, which share the GPU and may not fit together. Start all anyway?`)) return;
+  await post("/api/apps/all/on"); refresh();
+};
 $("all-off").onclick = async () => { if (confirm("Stop every app?")) { await post("/api/apps/all/off"); refresh(); } };
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 refresh();

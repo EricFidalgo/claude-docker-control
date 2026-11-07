@@ -6,9 +6,11 @@
   dock on      <app|all>      start (creates the app first if its containers don't exist)
   dock off     <app|all>      stop (containers and data are kept)
   dock restart <app|all>      restart
+  dock updates                ask each image's registry whether a newer image is out
+  dock update  <app|all>      pull newer images and recreate the containers (data is kept)
   dock logs    <container> [lines]
   dock panel                  serve the phone panel on 127.0.0.1:<panel.port>
-  dock password               set the panel's phone unlock password, 6+ numbers (also the way back in; turns Face ID off)
+  dock password               set the ONE phone password shared by the panel, Money and VoiceStudio, 6+ numbers (also the way back in; turns Face ID off)
 
 The panel locks phone visits (those through `tailscale serve`) behind the password or Face ID; this PC
 needs no unlock. lock.py and lock.js are copies of the Money app's (finance_tracker/finance/), kept identical.
@@ -23,7 +25,10 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from datetime import datetime
+from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.request import Request, urlopen
 
 import yaml
 
@@ -32,7 +37,7 @@ sys.path.insert(0, str(HERE))
 import lock  # noqa: E402
 
 # DOCK_PORT and DOCK_LOCK let a test copy of the panel run beside the real one.
-LOCK = lock.Lock(Path(os.environ.get("DOCK_LOCK") or HERE / "lock.json"), cookie="dock_lock", rp_name="Docker")
+LOCK = lock.Lock(Path(os.environ.get("DOCK_LOCK") or Path.home() / ".local/share/app-lock/lock.json"), cookie="dock_lock", rp_name="Docker")
 
 # apps.yaml is this machine's own list and stays out of git; apps.example.yaml shows the format.
 if not (HERE / "apps.yaml").exists():
@@ -62,6 +67,9 @@ def inspect_all():
         st = c["State"]
         out[c["Name"].lstrip("/")] = {
             "name": c["Name"].lstrip("/"),
+            "id": c["Id"],
+            "image_id": c["Image"],
+            "service": (c["Config"].get("Labels") or {}).get("com.docker.compose.service"),
             "running": st["Status"] == "running",
             "state": st["Status"],
             "health": (st.get("Health") or {}).get("Status"),
@@ -104,8 +112,10 @@ def app_dir(spec):
 
 
 def turn(app, action):
-    """action: on | off | restart"""
+    """action: on | off | restart | update"""
     spec = APPS[app]
+    if action == "update":
+        return update(app)
     if "containers" in spec:
         sh(["docker", {"on": "start", "off": "stop", "restart": "restart"}[action], *spec["containers"]])
     else:
@@ -122,6 +132,45 @@ def turn(app, action):
             sh([*base, "up", "-d"])
     if action != "off" and "after_start" in spec:
         sh(["bash", "-c", os.path.expanduser(spec["after_start"])], cwd=app_dir(spec))
+
+
+def update(app):
+    """Pull newer images and recreate the app's containers. Volumes and data are kept. Services that were
+    running come back running; stopped ones are recreated but stay stopped, and never-created ones stay
+    uncreated. An app with an `up:` command is recreated through it, because that command loads keys
+    its compose file needs, so all of that app comes back running."""
+    spec = APPS[app]
+    if "compose" not in spec:
+        raise RuntimeError("only compose apps can be updated here")
+    base, d = compose_cmd(spec)
+    cs = members(app, inspect_all())
+    running = sorted({c["service"] for c in cs if c["running"] and c["service"]})
+    stopped = sorted({c["service"] for c in cs if not c["running"] and c["service"]} - set(running))
+    sh([*base, "pull", "--ignore-buildable", "--quiet", *running, *stopped])
+    if "up" in spec:
+        sh(["bash", "-c", spec["up"]], cwd=d)
+    else:
+        if running:
+            sh([*base, "up", "-d", "--no-deps", *running])
+        if stopped:
+            sh([*base, "up", "--no-start", "--no-deps", *stopped])
+    _repo_digests.clear()
+    _df["at"] = 0
+    if (running or "up" in spec) and "after_start" in spec:
+        sh(["bash", "-c", os.path.expanduser(spec["after_start"])], cwd=d)
+
+
+def gpu_clash(app, every, gpu=False):
+    """Who else is on the GPU when `app` (a `gpu: true` app) starts: other GPU apps that are on, and
+    programs outside Docker holding memory on the card (the VoiceStudio desktop app, say)."""
+    if not APPS[app].get("gpu"):
+        return []
+    out = [APPS[a].get("label", a) for a in APPS
+           if a != app and APPS[a].get("gpu") and status(a, every)["state"] in ("on", "partial")]
+    for u in ((gpu_stats(every) if gpu is False else gpu) or {}).get("users", []):
+        if u["app"] is None and u["label"] not in out:
+            out.append(u["label"])
+    return out
 
 
 def owner(container, every):
@@ -175,8 +224,10 @@ def links(app, every):
     out = []
     for w in APPS[app].get("web", []):
         port = int(w["port"])
-        holder = next((c for c in cs if port in c["binds"]), None)
-        bind = holder["binds"][port] if holder else None
+        # `upstream:` = the page on `port` is a gate (lock, key) in front of the container's own port.
+        app_port = int(w.get("upstream", port))
+        holder = next((c for c in cs if app_port in c["binds"]), None)
+        bind = "127.0.0.1" if "upstream" in w else holder["binds"][port] if holder else None
         phone = ts["serve"].get(port)
         if not phone and ts["host"] and bind in ("0.0.0.0", *ts["ips"]):
             phone = f"http://{ts['host']}:{port}/"
@@ -215,7 +266,199 @@ def backup_stats():
         return {"age": None, "warnings": 0}
 
 
-def host_stats():
+MIB = 1024 ** 2
+
+
+def _num(s):
+    try:
+        return int(float(s))
+    except ValueError:  # nvidia-smi prints [N/A] for what a card can't report
+        return None
+
+
+def gpu_user(pid, every):
+    """(app id, label) for a process on the GPU: the app owning its container, else the program's name.
+    A program under /opt/<Name>/ is named after that folder (the VoiceStudio desktop app is /opt/VoiceStudio)."""
+    try:
+        cg = Path(f"/proc/{pid}/cgroup").read_text()
+    except OSError:
+        return None, f"process {pid}"
+    m = re.search(r"docker[-/]([0-9a-f]{64})", cg)
+    if m:
+        c = next((c for c in every.values() if c["id"] == m.group(1)), None)
+        app = c and owner(c["name"], every)
+        if app:
+            return app, APPS[app].get("label", app)
+        return None, f"container {c['name']}" if c else "a container"
+    try:
+        exe = os.readlink(f"/proc/{pid}/exe")
+    except OSError:
+        exe = ""
+    top = re.match(r"/opt/([^/]+)/", exe)
+    if top:
+        return None, f"{top.group(1)} (outside Docker)"
+    try:
+        return None, Path(f"/proc/{pid}/comm").read_text().strip()
+    except OSError:
+        return None, f"process {pid}"
+
+
+def gpu_stats(every):
+    """The card's memory, load and temperature, and who holds memory on it. None without an NVIDIA card."""
+    if not shutil.which("nvidia-smi"):
+        return None
+    q = ["nvidia-smi", "--format=csv,noheader,nounits"]
+    r = sh([*q, "--query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu"], check=False)
+    if r.returncode or not r.stdout.strip():
+        return None
+    name, used, total, util, temp = (x.strip() for x in r.stdout.splitlines()[0].split(","))
+    users = {}
+    for line in sh([*q, "--query-compute-apps=pid,used_memory"], check=False).stdout.splitlines():
+        pid, mem = (x.strip() for x in line.split(","))
+        app, label = gpu_user(pid, every)
+        u = users.setdefault(label, {"app": app, "label": label, "mem": 0})
+        u["mem"] += (_num(mem) or 0) * MIB
+    return {"name": name, "used": (_num(used) or 0) * MIB, "total": (_num(total) or 0) * MIB,
+            "util": _num(util), "temp": _num(temp), "users": sorted(users.values(), key=lambda u: -u["mem"])}
+
+
+UNITS = {"B": 1, "kB": 1e3, "KB": 1e3, "MB": 1e6, "GB": 1e9, "TB": 1e12}
+
+
+def _bytes(s):
+    """Docker's '24.6GB' / '476.8kB' / '0B' as bytes."""
+    m = re.match(r"([\d.]+)\s*([kKMGT]?B)", s or "")
+    return int(float(m.group(1)) * UNITS[m.group(2)]) if m else 0
+
+
+_df = {"at": 0.0, "val": None}
+
+
+def docker_disk():
+    """Image and build-cache space, which images no container uses, and each image's build date.
+    Refreshed once a minute (the two `docker system df` calls take ~0.1 s)."""
+    if _df["val"] and time.time() - _df["at"] < 60:
+        return _df["val"]
+    try:
+        summary = {d["Type"]: d for d in map(json.loads, sh(["docker", "system", "df", "--format", "{{json .}}"]).stdout.splitlines())}
+        images = json.loads(sh(["docker", "system", "df", "-v", "--format", "{{json .}}"]).stdout).get("Images") or []
+    except (RuntimeError, ValueError, KeyError):
+        return _df["val"]
+    unused = [i for i in images if str(i.get("Containers")) == "0"]
+    created = {}
+    for i in images:
+        try:  # "2026-11-03 19:53:23 -0500 EST"
+            created[i["ID"]] = datetime.strptime(i["CreatedAt"][:25], "%Y-%m-%d %H:%M:%S %z").isoformat()
+        except (KeyError, ValueError):
+            pass
+    _df.update(at=time.time(), val={
+        "images": _bytes(summary.get("Images", {}).get("Size")),
+        "count": len(images),
+        # Unique size is what removing the image frees; layers shared with an image in use stay.
+        "unused": len(unused), "unused_bytes": sum(_bytes(i.get("UniqueSize")) for i in unused),
+        "cache": _bytes(summary.get("Build Cache", {}).get("Size")),
+        "created": created,
+    })
+    return _df["val"]
+
+
+# ---- image updates -----------------------------------------------------------------------
+# The registry is asked with HEAD requests only. Docker Hub doesn't count those against its pull limit,
+# so checking never uses up the pulls a real `docker pull` needs.
+
+MANIFESTS = ", ".join([
+    "application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.docker.distribution.manifest.v2+json", "application/vnd.oci.image.manifest.v1+json"])
+
+
+def parse_ref(ref):
+    """'lscr.io/linuxserver/lidarr:latest' -> ('lscr.io', 'linuxserver/lidarr', 'latest'); Docker Hub names get its host."""
+    name, tag = ref, "latest"
+    if ":" in name.rsplit("/", 1)[-1]:
+        name, tag = name.rsplit(":", 1)
+    first = name.split("/", 1)[0]
+    if "/" in name and ("." in first or ":" in first or first == "localhost"):
+        reg, repo = name.split("/", 1)
+    else:
+        reg, repo = "registry-1.docker.io", name if "/" in name else "library/" + name
+    return reg, repo, tag
+
+
+def remote_digest(ref):
+    """The digest the registry serves for this tag now, using an anonymous token when the registry wants one."""
+    reg, repo, tag = parse_ref(ref)
+    url = f"https://{reg}/v2/{repo}/manifests/{tag}"
+
+    def head(token=None):
+        h = {"Accept": MANIFESTS, "User-Agent": "dock-update-check"}
+        if token:
+            h["Authorization"] = "Bearer " + token
+        return urlopen(Request(url, method="HEAD", headers=h), timeout=15)
+
+    try:
+        r = head()
+    except HTTPError as e:
+        if e.code != 401:
+            raise
+        p = dict(re.findall(r'(\w+)="([^"]*)"', e.headers.get("WWW-Authenticate", "")))
+        q = urlencode({"service": p.get("service", reg), "scope": p.get("scope") or f"repository:{repo}:pull"})
+        t = json.load(urlopen(p["realm"] + "?" + q, timeout=15))
+        r = head(t.get("token") or t.get("access_token"))
+    return r.headers.get("Docker-Content-Digest")
+
+
+_repo_digests = {}  # image id -> the registry digests it was pulled as ([] for an image built here)
+
+
+def repo_digests(image_id):
+    if image_id not in _repo_digests:
+        r = sh(["docker", "image", "inspect", "--format", "{{json .RepoDigests}}", image_id], check=False)
+        try:
+            _repo_digests[image_id] = [d.split("@", 1)[1] for d in json.loads(r.stdout) or [] if "@" in d]
+        except ValueError:
+            return []
+    return _repo_digests[image_id]
+
+
+updates = {"at": None, "remote": {}, "errors": {}}  # remote: image ref -> digest the registry has now
+
+
+def check_updates():
+    """Ask the registry about every image a listed app's containers use. Images built on this machine are skipped."""
+    every = inspect_all()
+    refs = {c["image"] for a in APPS for c in members(a, every)
+            if "@" not in c["image"] and not c["image"].startswith("sha256:") and repo_digests(c["image_id"])}
+    remote, errors = {}, {}
+    for ref in sorted(refs):
+        try:
+            remote[ref] = remote_digest(ref)
+        except Exception as e:  # offline, or the registry is down: keep the last answer for this one
+            errors[ref] = str(e)
+            if ref in updates["remote"]:
+                remote[ref] = updates["remote"][ref]
+    updates.update(at=time.time(), remote=remote, errors=errors)
+
+
+def has_update(c):
+    """True if the registry has a newer image than the one this container runs, None if unknown."""
+    want = updates["remote"].get(c["image"])
+    have = repo_digests(c["image_id"])
+    if not want or not have:
+        return None
+    return want not in have
+
+
+def updates_loop():
+    time.sleep(30)  # let the panel and tailscale settle after a boot
+    while True:
+        try:
+            check_updates()
+        except Exception as e:
+            print(f"update check failed: {e}", flush=True)
+        time.sleep(12 * 3600)
+
+
+def host_stats(every):
     mem = {l.split(":")[0]: int(l.split()[1]) * 1024 for l in Path("/proc/meminfo").read_text().splitlines()}
     disks = []
     for d in PANEL.get("disks", [{"label": "System", "path": "/"}]):
@@ -234,6 +477,9 @@ def host_stats():
         "disks": disks,
         "tailscale": tailscale()["host"],
         "backup": backup_stats(),
+        "gpu": gpu_stats(every),
+        "docker": {k: v for k, v in (docker_disk() or {}).items() if k != "created"} or None,
+        "updates_checked": updates["at"],
     }
 
 
@@ -280,23 +526,29 @@ def run_in_background(app, label, work):
     return True
 
 
-VERB = {"on": "starting", "off": "stopping", "restart": "restarting"}
+VERB = {"on": "starting", "off": "stopping", "restart": "restarting", "update": "updating"}
 
 
 def snapshot():
     every = inspect_all()
+    host = host_stats(every)
+    built = (docker_disk() or {}).get("created", {})
     rows, claimed = [], set()
     for app, spec in APPS.items():
-        cs = members(app, every)
+        cs = sorted(members(app, every), key=lambda c: c["name"])
         claimed.update(c["name"] for c in cs)
+        containers = [{**{k: c[k] for k in ("name", "running", "state", "health", "started", "finished",
+                                            "error", "exit", "restarts", "image")},
+                       "built": built.get(c["image_id"]), "update": has_update(c), **stats.get(c["name"], {})}
+                      for c in cs]
         rows.append({
             "id": app, "label": spec.get("label", app), "note": spec.get("note", ""),
             **status(app, every), "busy": busy.get(app), "web": links(app, every),
-            "containers": [{**{k: c[k] for k in ("name", "running", "state", "health", "started", "finished",
-                                                  "error", "exit", "restarts", "image")}, **stats.get(c["name"], {})}
-                           for c in sorted(cs, key=lambda c: c["name"])],
+            "gpu": bool(spec.get("gpu")), "gpu_clash": gpu_clash(app, every, host["gpu"]),
+            "can_update": "compose" in spec, "updates": [c["name"] for c in containers if c["update"]],
+            "containers": containers,
         })
-    return {"host": host_stats(), "apps": rows, "unlisted": sorted(set(every) - claimed)}
+    return {"host": host, "apps": rows, "unlisted": sorted(set(every) - claimed)}
 
 
 ICON = HERE / "icon.png"
@@ -316,14 +568,17 @@ class Panel(BaseHTTPRequestHandler):
 
     def reply(self, code, body, ctype="application/json", cookie=None):
         data = body if isinstance(body, bytes) else body.encode()
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
-        if cookie:
-            self.send_header("Set-Cookie", cookie)
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            if cookie:
+                self.send_header("Set-Cookie", cookie)
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the phone closed the page or lost signal mid-reply; nothing to answer
 
     def guarded(self):
         """Answers the request here if the lock owns it: /api/auth*, or an API call from a locked phone."""
@@ -381,11 +636,14 @@ class Panel(BaseHTTPRequestHandler):
         if self.headers.get("X-Dock") != "1":
             return self.reply(403, "{}")
         parts = self.path.strip("/").split("/")
-        # api/apps/<id|all>/<on|off|restart>
+        # api/apps/<id|all>/<on|off|restart|update>
         if len(parts) == 4 and parts[:2] == ["api", "apps"] and parts[3] in VERB:
             if parts[2] == "all" or parts[2] in APPS:
                 act = parts[3]
-                started = [run_in_background(n, VERB[act], lambda n=n: turn(n, act)) for n in resolve(parts[2])]
+                names = resolve(parts[2])
+                if act == "update":
+                    names = [n for n in names if "compose" in APPS[n]]
+                started = [run_in_background(n, VERB[act], lambda n=n: turn(n, act)) for n in names]
                 return self.reply(202 if any(started) else 409, "{}")
         # api/containers/<name>/restart
         if len(parts) == 4 and parts[:2] == ["api", "containers"] and parts[3] == "restart":
@@ -400,6 +658,7 @@ def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
     if cmd == "panel":
         threading.Thread(target=stats_loop, daemon=True).start()
+        threading.Thread(target=updates_loop, daemon=True).start()
         print(f"panel on http://127.0.0.1:{PORT}", flush=True)
         ThreadingHTTPServer(("127.0.0.1", PORT), Panel).serve_forever()
     elif cmd == "status":
@@ -415,8 +674,25 @@ def main():
         ts = tailscale()
         if ts["host"]:
             print(f"{'This panel':16}      phone: {ts['serve'].get(PORT, '(not served)')}")
+    elif cmd == "updates":
+        check_updates()
+        every, found = inspect_all(), False
+        for app in APPS:
+            for c in members(app, every):
+                if has_update(c):
+                    found = True
+                    print(f"{app:16} {c['name']:24} {c['image']}  newer image out  (dock update {app})")
+        for ref, err in updates["errors"].items():
+            print(f"couldn't check {ref}: {err}", file=sys.stderr)
+        if not found:
+            print("Every image is up to date (images built on this machine aren't checked).")
     elif cmd in VERB and len(sys.argv) == 3:
         for app in resolve(sys.argv[2]):
+            if cmd == "update" and "compose" not in APPS[app]:
+                continue
+            if cmd == "on":
+                if clash := gpu_clash(app, inspect_all()):
+                    print(f"warning: {', '.join(clash)} is also on the GPU; both may not fit on the card", file=sys.stderr)
             print(f"{cmd} {app} ...", flush=True)
             turn(app, cmd)
     elif cmd == "password":

@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
 atvloadly/data/
-lock.json
+lock.json*
 apps.yaml
+voicestudio/.env
+*.bak
