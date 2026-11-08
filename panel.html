@@ -7,152 +7,305 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Docker">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#0b0b0c" media="(prefers-color-scheme: dark)">
 <link rel="apple-touch-icon" href="/icon.png">
 <link rel="icon" href="/icon.png">
 <link rel="manifest" href="/manifest.webmanifest">
 <title>Docker Apps</title>
 <style>
-  :root { --bg:#f2f2f7; --card:#fff; --text:#111; --muted:#6b6b72; --line:#e3e3e8; --fill:#e9e9ee; --on:#34c759; --off:#c9c9ce;
-          --warn:#ff9f0a; --bad:#ff3b30; --link:#007aff; --code:#f6f6f8; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#000; --card:#1c1c1e; --text:#f5f5f7; --muted:#9a9aa1; --line:#2c2c2e; --fill:#2c2c2e;
-          --off:#3a3a3c; --link:#0a84ff; --code:#111113; } }
-  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.35 -apple-system, system-ui, sans-serif;
-         padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom)); }
-  main { max-width: 560px; margin: 0 auto; }
-  header { display:flex; align-items:baseline; justify-content:space-between; margin: 8px 4px 16px; }
-  h1 { font-size: 28px; margin:0; letter-spacing:-.02em; }
-  h2 { font-size:13px; font-weight:400; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:24px 16px 8px; }
-  #stamp { color:var(--muted); font-size:13px; }
-  .card { background:var(--card); border-radius:14px; overflow:hidden; }
-  button { font:inherit; color:inherit; }
+  /* Grouped, iOS-style surfaces: one accent (blue) for actions; green, amber and red only ever mean state. */
+  :root {
+    --bg:#f2f2f7; --surface:#fff; --surface-2:#f2f2f7; --fill:rgba(120,120,128,.12); --fill-2:rgba(120,120,128,.2);
+    --text:#1c1c1e; --muted:#6e6e73; --faint:#aeaeb2; --line:rgba(60,60,67,.13);
+    --accent:#0066d6; --accent-tint:rgba(0,102,214,.1);
+    --on:#34c759; --on-text:#1f7a35; --on-tint:rgba(52,199,89,.14);
+    --warn:#ff9f0a; --warn-text:#a35200; --bad:#ff3b30; --bad-text:#c4000f;
+    --switch-off:#e3e3e8; --scrim:rgba(0,0,0,.32); --glass:rgba(242,242,247,.72); --code:#fafafc;
+    --shadow:0 1px 2px rgba(20,20,40,.04), 0 6px 24px rgba(20,20,40,.06);
+    --ease:cubic-bezier(.32,.72,0,1); /* the curve iOS sheets ride on */
+    --r:16px; --r-sm:10px;
+  }
+  @media (prefers-color-scheme: dark) { :root {
+    --bg:#0b0b0c; --surface:#1c1c1e; --surface-2:#2c2c2e; --fill:rgba(120,120,128,.24); --fill-2:rgba(120,120,128,.34);
+    --text:#f5f5f7; --muted:#98989f; --faint:#636366; --line:rgba(84,84,88,.5);
+    --accent:#3d8bff; --accent-tint:rgba(61,139,255,.16);
+    --on:#30d158; --on-text:#30d158; --on-tint:rgba(48,209,88,.16);
+    --warn:#ffa31a; --warn-text:#ffb340; --bad:#ff453a; --bad-text:#ff6961;
+    --switch-off:#39393d; --scrim:rgba(0,0,0,.55); --glass:rgba(22,22,24,.72); --code:#111113;
+    --shadow:none;
+  } }
 
-  /* host */
-  .host { display:grid; grid-template-columns:repeat(auto-fit, minmax(110px, 1fr)); gap:14px 16px; padding:14px 16px; }
-  .stat .k { color:var(--muted); font-size:12px; }
-  .stat .v { font-weight:600; font-variant-numeric:tabular-nums; white-space:nowrap; }
-  .bar { height:4px; border-radius:2px; background:var(--fill); margin-top:5px; overflow:hidden; }
-  .bar i { display:block; height:100%; background:var(--on); border-radius:2px; }
-  .bar i.warn { background:var(--warn); } .bar i.bad { background:var(--bad); }
-  .hostsum { display:flex; align-items:center; gap:6px; width:100%; border:0; border-top:1px solid var(--line); background:none;
-             padding:11px 16px; color:var(--muted); font-size:13px; text-align:left; cursor:pointer; }
-  .hostsum .grow { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .hostsum .warn { color:var(--warn); }
-  #host.more .hostsum .chev { transform:rotate(90deg); }
-  .hostmore { display:none; padding:0 16px 12px; }
-  #host.more .hostmore { display:block; }
-  .hostline { color:var(--muted); font-size:13px; padding:3px 0; }
-  .hostline.warn { color:var(--warn); }
-
-  .dot { width:8px; height:8px; border-radius:50%; background:var(--off); flex:none; }
-  .dot.on { background:var(--on); } .dot.warn { background:var(--warn); } .dot.bad { background:var(--bad); }
-
-  /* apps */
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html { background:var(--bg); }
+  body { margin:0; background:var(--bg); color:var(--text); font:17px/1.35 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+         -webkit-font-smoothing:antialiased; touch-action:manipulation;
+         padding:0 max(16px, env(safe-area-inset-right)) max(32px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+  main { max-width:600px; margin:0 auto; }
+  button, select { font:inherit; color:inherit; }
+  button { cursor:pointer; }
+  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:8px; }
   ul { list-style:none; margin:0; padding:0; }
-  .app + .app { border-top:1px solid var(--line); }
-  .row { display:flex; align-items:center; gap:12px; padding:14px 16px; min-height:68px; }
-  .expand { flex:1; min-width:0; display:flex; align-items:center; gap:10px; border:0; background:none; padding:0; text-align:left; cursor:pointer; }
-  .chev { color:var(--muted); transition:transform .2s; flex:none; }
-  .app.open .chev { transform:rotate(90deg); }
+  .num { font-variant-numeric:tabular-nums; }
+
+  /* Pressing anything gives way a little, on the press itself. */
+  .press { transition:transform .12s ease-out, background-color .2s, opacity .2s; }
+  .press:active:not(:disabled) { transform:scale(.97); transition-duration:.06s; }
+
+  /* ---- title and compact bar */
+  .hero { padding:max(20px, calc(env(safe-area-inset-top) + 12px)) 4px 20px; }
+  h1 { font-size:34px; line-height:1.1; font-weight:700; letter-spacing:-.022em; margin:0; }
+  .hero p { margin:6px 0 0; color:var(--muted); font-size:15px; }
+  .hero .live { color:var(--on-text); font-weight:600; }
+  #bar { position:fixed; inset:0 0 auto; z-index:5; display:flex; justify-content:center; align-items:center;
+         padding:env(safe-area-inset-top) 16px 0; height:calc(env(safe-area-inset-top) + 44px);
+         background:var(--glass); -webkit-backdrop-filter:blur(20px) saturate(180%); backdrop-filter:blur(20px) saturate(180%);
+         font-size:17px; font-weight:600; opacity:0; pointer-events:none; transition:opacity .2s; }
+  #bar::after { content:""; position:absolute; inset:auto 0 0; height:1px; background:var(--line); }
+  #bar.show { opacity:1; }
+
+  #offline { display:none; align-items:center; gap:10px; margin:0 0 16px; padding:12px 14px; border-radius:var(--r);
+             background:var(--surface); box-shadow:var(--shadow); color:var(--bad-text); font-size:15px; }
+  #offline.show { display:flex; }
+
+  section + section { margin-top:32px; }
+  .sechead { display:flex; align-items:baseline; justify-content:space-between; margin:0 4px 10px; }
+  h2 { font-size:22px; line-height:1.2; font-weight:700; letter-spacing:-.012em; margin:0; text-wrap:balance; }
+  .sechead span { color:var(--muted); font-size:15px; }
+  .card { background:var(--surface); border-radius:var(--r); box-shadow:var(--shadow); overflow:hidden; }
+
+  /* ---- this computer */
+  .tiles { display:grid; grid-template-columns:repeat(6, 1fr); gap:10px; }
+  .tile { grid-column:span var(--span, 2); background:var(--surface); border-radius:var(--r); box-shadow:var(--shadow);
+          padding:12px 14px 14px; min-width:0; }
+  .tile .k { color:var(--muted); font-size:13px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .tile .v { font-size:26px; line-height:1.15; font-weight:600; letter-spacing:-.02em; margin-top:2px; white-space:nowrap; }
+  .tile .v small { font-size:15px; font-weight:500; color:var(--muted); letter-spacing:0; margin-left:1px; }
+  .tile .d { color:var(--muted); font-size:12px; margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .meter { height:4px; border-radius:2px; background:var(--fill); margin-top:10px; overflow:hidden; }
+  .meter i { display:block; height:100%; width:100%; border-radius:2px; background:var(--on); transform-origin:left;
+             transform:scaleX(var(--p, 0)); transition:transform .6s var(--ease); }
+  .meter i.warn { background:var(--warn); } .meter i.bad { background:var(--bad); }
+  .tile.wide .v { font-size:22px; }
+
+  .hostsum { display:flex; align-items:center; gap:10px; width:100%; margin-top:10px; border:0; background:var(--surface);
+             border-radius:var(--r); box-shadow:var(--shadow); padding:13px 16px; text-align:left; font-size:15px; color:var(--muted); }
+  .hostsum .grow { flex:1; min-width:0; text-wrap:pretty; }
+  .hostsum .warn { color:var(--warn-text); }
+  .hostsum[aria-expanded="true"] .chev { transform:rotate(135deg); }
+  .hostmore { padding:0 16px; }
+  .hostmore div { color:var(--muted); font-size:14px; padding:10px 0; }
+  .hostmore div + div { border-top:1px solid var(--line); }
+  .hostmore b { color:var(--text); font-weight:500; }
+
+  .chev { flex:none; width:8px; height:8px; border:solid var(--faint); border-width:2px 2px 0 0; transform:rotate(45deg);
+          margin:0 4px 0 2px; transition:transform .25s var(--ease); }
+
+  /* ---- rows: apps and programs share one shape */
+  .row { display:flex; align-items:center; gap:12px; padding:12px 14px 12px 12px; min-height:68px; }
+  li + li > .row, li + li.prog { border-top:1px solid var(--line); }
+  .icon { flex:none; width:40px; height:40px; border-radius:var(--r-sm); display:grid; place-items:center;
+          background:var(--fill); color:var(--muted); font-size:17px; font-weight:600; transition:background-color .3s, color .3s; }
+  .icon.on { background:var(--on-tint); color:var(--on-text); }
+  .icon.warn { background:rgba(255,159,10,.16); color:var(--warn-text); }
+  .icon.bad { background:rgba(255,59,48,.14); color:var(--bad-text); }
+  .expand { flex:1; min-width:0; display:flex; align-items:center; gap:12px; border:0; background:none; padding:0; text-align:left; }
   .info { flex:1; min-width:0; }
-  .name { font-weight:600; }
-  .sub { color:var(--muted); font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .sub.err { color:var(--bad); white-space:normal; }
-  .sub.warn { color:var(--warn); }
-  .sub.upd, .sub .upd { color:var(--link); }
-  button.sw { position:relative; width:56px; height:34px; flex:none; border:0; border-radius:17px; background:var(--off); transition:background .2s; padding:0; cursor:pointer; }
-  button.sw::after { content:""; position:absolute; top:2px; left:2px; width:30px; height:30px; border-radius:50%; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.3); transition:transform .2s; }
-  button.sw.on { background:var(--on); }
-  button.sw.on::after { transform:translateX(22px); }
-  button.sw.partial { background:var(--warn); }
-  button.sw.partial::after { transform:translateX(11px); }
-  button.sw.busy { opacity:.55; animation:pulse 1s ease-in-out infinite; }
-  @keyframes pulse { 50% { opacity:.3; } }
+  .name { font-weight:600; font-size:17px; letter-spacing:-.01em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .name .chev { display:inline-block; margin-left:8px; vertical-align:2px; width:7px; height:7px; }
+  .app.open .name .chev { transform:rotate(135deg); vertical-align:4px; }
+  .sub { color:var(--muted); font-size:14px; margin-top:1px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sub.err { color:var(--bad-text); white-space:normal; }
+  .sub .ok { color:var(--on-text); font-weight:500; }
+  .sub .warn, .sub.warn { color:var(--warn-text); }
+  .sub .act { color:var(--accent); font-weight:500; }
 
-  .detail { padding:0 16px 14px; display:none; }
-  .app.open .detail { display:block; }
-  .group { background:var(--bg); border-radius:10px; overflow:hidden; margin-top:8px; }
-  .item { display:flex; align-items:center; gap:10px; padding:10px 12px; min-height:48px; }
+  .btn { flex:none; display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:34px; padding:0 14px;
+         border:0; border-radius:999px; background:var(--fill); color:var(--text); font-size:15px; font-weight:600;
+         text-decoration:none; white-space:nowrap; }
+  .btn.primary { background:var(--accent); color:#fff; }
+  .btn.tint { background:var(--accent-tint); color:var(--accent); }
+  .btn.danger { color:var(--bad-text); }
+  .btn:disabled { opacity:.38; cursor:default; }
+  @media (hover:hover) { .btn:hover:not(:disabled) { background:var(--fill-2); } .btn.primary:hover:not(:disabled) { filter:brightness(1.08); background:var(--accent); }
+                         .btn.tint:hover:not(:disabled) { background:var(--accent-tint); filter:brightness(1.05); } }
+
+  /* iOS switch */
+  .sw { position:relative; flex:none; width:51px; height:31px; border:0; padding:0; border-radius:16px; background:var(--switch-off);
+        transition:background-color .25s; }
+  .sw::after { content:""; position:absolute; top:2px; left:2px; width:27px; height:27px; border-radius:50%; background:#fff;
+               box-shadow:0 3px 8px rgba(0,0,0,.15), 0 1px 1px rgba(0,0,0,.16); transition:transform .3s var(--ease); }
+  .sw.on { background:var(--on); }
+  .sw.on::after { transform:translateX(20px); }
+  .sw.partial { background:var(--warn); }
+  .sw.partial::after { transform:translateX(10px); }
+  .sw.busy { animation:breathe 1.2s ease-in-out infinite; }
+  .sw:disabled { cursor:default; }
+  @keyframes breathe { 50% { opacity:.45; } }
+
+  /* app details */
+  .detail { padding:2px 14px 16px; }
+  .group { background:var(--surface-2); border-radius:12px; overflow:hidden; }
+  .group + .group { margin-top:10px; }
+  .item { display:flex; align-items:center; gap:10px; padding:11px 12px; min-height:52px; }
   .item + .item { border-top:1px solid var(--line); }
-  .item .info .name { font-weight:500; font-size:15px; }
-  .item .sub { font-size:12px; white-space:normal; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:11px; }
+  .item .name { font-size:15px; font-weight:500; }
+  .item .sub { font-size:13px; white-space:normal; }
+  .item .btn { min-height:30px; padding:0 12px; font-size:14px; background:var(--surface); }
+  @media (prefers-color-scheme: dark) { .item .btn { background:var(--fill-2); } }
+  .item .btn.primary { background:var(--accent); }
+  .mono { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px !important; }
   .item .sub.mono { white-space:nowrap; }
-  .pill { border:0; border-radius:8px; background:var(--fill); padding:0 12px; min-height:34px; font-size:14px; font-weight:500; cursor:pointer; flex:none;
-          display:inline-flex; align-items:center; text-decoration:none; color:var(--text); }
-  .pill.blue { background:var(--link); color:#fff; }
-  .pill.red { color:var(--bad); }
-  .pill:disabled { opacity:.4; }
-  .actions { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+  .dot { flex:none; width:8px; height:8px; border-radius:50%; background:var(--faint); }
+  .dot.on { background:var(--on); } .dot.warn { background:var(--warn); } .dot.bad { background:var(--bad); }
+  .actions { display:flex; gap:8px; margin-top:12px; flex-wrap:wrap; }
 
-  .prog { display:flex; align-items:center; gap:12px; padding:12px 16px; min-height:60px; }
-  .prog + .prog { border-top:1px solid var(--line); }
-  .prog .pill { min-width:72px; justify-content:center; }
-  .bulk { display:flex; gap:10px; margin-top:16px; }
-  .bulk button { flex:1; min-height:48px; border:0; border-radius:12px; background:var(--card); font-weight:600; cursor:pointer; }
-  .bulk button.stop { color:var(--bad); }
-  #offline { display:none; margin:12px 4px 0; color:var(--bad); font-size:14px; }
-  .foot { color:var(--muted); font-size:13px; margin:16px 4px 0; }
+  .bulk { display:grid; grid-template-columns:1fr 1fr; margin-top:10px; }
+  .bulk button { min-height:50px; border:0; background:none; font-size:17px; font-weight:500; color:var(--accent); }
+  .bulk button + button { border-left:1px solid var(--line); color:var(--bad-text); }
+  @media (hover:hover) { .bulk button:hover { background:var(--fill); } }
 
-  /* logs sheet */
-  #sheet { position:fixed; inset:0; z-index:10; display:none; flex-direction:column; background:var(--bg);
-           padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
-  #sheet.show { display:flex; }
-  #sheet .top { display:flex; align-items:center; gap:8px; padding:12px 16px; border-bottom:1px solid var(--line); }
-  #sheet .top .info { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  #sheet select { font:inherit; font-size:14px; border:0; border-radius:8px; background:var(--fill); color:var(--text); min-height:34px; padding:0 8px; }
-  #logtext { flex:1; margin:0; overflow:auto; padding:12px 16px; background:var(--code); white-space:pre-wrap; word-break:break-word;
-             font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; -webkit-overflow-scrolling:touch; }
-  @media (prefers-reduced-motion: reduce) { button.sw, button.sw::after, .chev, .hostsum .chev { transition:none; } button.sw.busy { animation:none; } }
+  .prog { display:flex; align-items:center; gap:12px; padding:12px 14px 12px 12px; min-height:68px; }
+  .prog .btns { display:flex; gap:8px; }
+
+  .foot { color:var(--muted); font-size:13px; margin:28px 4px 0; text-align:center; text-wrap:balance; }
+
+  /* ---- loading skeleton, shaped like what arrives */
+  .sk { background:var(--fill); border-radius:8px; }
+  .sk-tile { height:96px; border-radius:var(--r); }
+  .sk-row { height:68px; border-radius:0; background:none; display:flex; align-items:center; gap:12px; padding:0 14px 0 12px; }
+  .sk-row + .sk-row { border-top:1px solid var(--line); }
+  .sk-row i { display:block; background:var(--fill); border-radius:var(--r-sm); }
+  @media (prefers-reduced-motion: no-preference) { .sk, .sk-row i { animation:breathe 1.6s ease-in-out infinite; } }
+
+  /* ---- sheets: one for questions, one for logs */
+  .scrim { position:fixed; inset:0; z-index:20; background:var(--scrim); opacity:0; pointer-events:none; transition:opacity .3s; }
+  .scrim.show { opacity:1; pointer-events:auto; }
+  .sheet { position:fixed; z-index:21; left:0; right:0; bottom:0; margin:0 auto; max-width:600px; transform:translateY(105%);
+           transition:transform .42s var(--ease); overscroll-behavior:contain; }
+  .sheet.show { transform:none; }
+  #ask { padding:0 8px max(8px, env(safe-area-inset-bottom)); }
+  #ask .box { background:var(--glass); -webkit-backdrop-filter:blur(30px) saturate(180%); backdrop-filter:blur(30px) saturate(180%);
+              border-radius:14px; overflow:hidden; text-align:center; }
+  #ask .msg { padding:16px 18px; color:var(--muted); font-size:13px; }
+  #ask .msg b { display:block; color:var(--text); font-size:15px; font-weight:600; margin-bottom:4px; }
+  #ask button { display:block; width:100%; min-height:56px; border:0; border-top:1px solid var(--line); background:none;
+                font-size:20px; color:var(--accent); }
+  #ask button.danger { color:var(--bad-text); }
+  #ask .cancel { margin-top:8px; border:0; border-radius:14px; background:var(--surface); font-weight:600; }
+
+  #logs { top:max(12px, env(safe-area-inset-top)); display:flex; flex-direction:column; background:var(--bg); border-radius:14px 14px 0 0;
+          box-shadow:0 -8px 40px rgba(0,0,0,.18); overflow:hidden; }
+  #logs .grab { width:36px; height:5px; border-radius:3px; background:var(--fill-2); margin:6px auto 0; flex:none; }
+  #logs .top { display:flex; align-items:center; gap:8px; padding:8px 12px 10px 16px; flex:none; }
+  #logs .top .t { flex:1; min-width:0; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #logs select { border:0; border-radius:999px; background:var(--fill); color:var(--text); min-height:34px; padding:0 10px; font-size:15px; }
+  #logtext { flex:1; margin:0; overflow:auto; padding:14px 16px max(16px, env(safe-area-inset-bottom)); background:var(--code);
+             border-top:1px solid var(--line); white-space:pre-wrap; word-break:break-word; overscroll-behavior:contain;
+             font:12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; -webkit-overflow-scrolling:touch; }
+
+  #toast { position:fixed; z-index:30; left:50%; bottom:max(20px, env(safe-area-inset-bottom)); width:max-content; max-width:calc(100% - 32px);
+           transform:translate(-50%, 150%); padding:12px 18px; border-radius:var(--r); text-align:center; background:var(--text); color:var(--bg);
+           font-size:15px; font-weight:500; box-shadow:0 8px 30px rgba(0,0,0,.2); visibility:hidden;
+           transition:transform .4s var(--ease), visibility 0s .4s; }
+  #toast.show { transform:translate(-50%, 0); visibility:visible; transition:transform .4s var(--ease); }
+
+  @media (max-width:360px) { .tile .v { font-size:22px; } .tiles { gap:8px; } }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition-duration:.01ms !important; animation:none !important; }
+    .sheet:not(.show), #toast:not(.show) { opacity:0; }
+  }
+  @media (prefers-reduced-transparency: reduce) {
+    #bar, #ask .box { background:var(--surface); -webkit-backdrop-filter:none; backdrop-filter:none; }
+  }
 </style>
 <script src="/lock.js" data-name="Docker" data-setup="dock password"></script>
 </head>
 <body>
+<div id="bar" aria-hidden="true">Docker</div>
 <main>
-  <header><h1>Docker</h1><span id="stamp"></span></header>
-  <section class="card" id="host"></section>
-  <h2>Apps</h2>
-  <ul class="card" id="list"></ul>
-  <div class="bulk"><button id="all-on">Start all</button><button id="all-off" class="stop">Stop all</button></div>
-  <h2 id="progs-h">On this PC</h2>
-  <ul class="card" id="progs"></ul>
-  <p id="offline">Can't reach the panel. Is the computer awake and on Tailscale?</p>
+  <header class="hero">
+    <h1 id="title">Docker</h1>
+    <p id="status" aria-live="polite">Connecting…</p>
+  </header>
+
+  <div id="offline" role="alert"><span class="dot bad"></span><span>Can’t reach the PC. Check it’s awake and on Tailscale.</span></div>
+
+  <section aria-labelledby="h-host">
+    <div class="sechead"><h2 id="h-host">This Computer</h2><span id="hostname" translate="no"></span></div>
+    <div class="tiles" id="tiles">
+      <div class="sk sk-tile" style="grid-column:span 2"></div><div class="sk sk-tile" style="grid-column:span 2"></div>
+      <div class="sk sk-tile" style="grid-column:span 2"></div>
+    </div>
+    <div id="hostsum"></div>
+  </section>
+
+  <section aria-labelledby="h-apps">
+    <div class="sechead"><h2 id="h-apps">Apps</h2><span id="appcount" class="num"></span></div>
+    <ul class="card" id="list">
+      <li class="sk-row"><i style="width:40px;height:40px"></i><i style="width:45%;height:14px"></i></li>
+      <li class="sk-row"><i style="width:40px;height:40px"></i><i style="width:35%;height:14px"></i></li>
+      <li class="sk-row"><i style="width:40px;height:40px"></i><i style="width:50%;height:14px"></i></li>
+    </ul>
+    <div class="card bulk"><button class="press" id="all-on">Start All</button><button class="press" id="all-off">Stop All</button></div>
+  </section>
+
+  <section aria-labelledby="h-progs" id="progs-sec" hidden>
+    <div class="sechead"><h2 id="h-progs">On This PC</h2></div>
+    <ul class="card" id="progs"></ul>
+  </section>
+
   <p class="foot" id="foot"></p>
 </main>
 
-<div id="sheet" role="dialog" aria-modal="true" aria-label="Logs">
-  <div class="top">
-    <div class="info" id="logtitle">Logs</div>
-    <select id="loglines" aria-label="Lines"><option>100</option><option selected>300</option><option>1000</option></select>
-    <button class="pill" id="logrefresh">Refresh</button>
-    <button class="pill blue" id="logclose">Done</button>
-  </div>
-  <pre id="logtext"></pre>
+<div class="scrim" id="scrim"></div>
+<div class="sheet" id="ask" role="alertdialog" aria-modal="true" aria-labelledby="ask-t" aria-describedby="ask-m">
+  <div class="box"><div class="msg"><b id="ask-t"></b><span id="ask-m"></span></div><button class="press" id="ask-ok"></button></div>
+  <button class="press cancel" id="ask-no">Cancel</button>
 </div>
+<div class="sheet" id="logs" role="dialog" aria-modal="true" aria-labelledby="logtitle">
+  <div class="grab"></div>
+  <div class="top">
+    <div class="t" id="logtitle" translate="no">Logs</div>
+    <select id="loglines" aria-label="How many lines"><option value="100">100 lines</option><option value="300" selected>300 lines</option><option value="1000">1000 lines</option></select>
+    <button class="btn press" id="logrefresh">Refresh</button>
+    <button class="btn primary press" id="logclose">Done</button>
+  </div>
+  <pre id="logtext" tabindex="0"></pre>
+</div>
+<div id="toast" role="status" aria-live="polite"></div>
 
 <script>
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 const post = (path) => fetch(path, { method: "POST", headers: { "X-Dock": "1" } });
-const opened = new Set(JSON.parse(localStorageGet("dock.open") || "[]"));
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+};
+const opened = new Set(JSON.parse(store.get("dock.open") || "[]"));
 let state = null;
-let hostMore = !!localStorageGet("dock.hostmore");
+let hostMore = !!store.get("dock.hostmore");
 const pending = new Set();  // programs just asked to open or close
 
-function localStorageGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
-function saveOpen() { try { localStorage.setItem("dock.open", JSON.stringify([...opened])); } catch {} }
-
-const gb = (b) => { const g = b / 1024 ** 3; return g >= 1000 ? (g / 1024).toFixed(1) + " TB" : (g >= 100 ? g.toFixed(0) : g.toFixed(1)) + " GB"; };
-const size = (b) => b < 1024 ** 3 ? `${Math.round(b / 1024 ** 2)} MB` : gb(b);
-function ago(iso) {
-  if (!iso || iso.startsWith("0001")) return "";
-  let s = Math.max(0, (Date.now() - new Date(iso)) / 1000);
+// ---- formatting
+const one = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1, minimumFractionDigits: 1 });
+const whole = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
+function gbParts(b) {
+  const g = b / 1024 ** 3;
+  return g >= 1000 ? [one.format(g / 1024), "TB"] : [g >= 100 ? whole.format(g) : one.format(g), "GB"];
+}
+const gb = (b) => gbParts(b).join(" ");
+const size = (b) => b < 1024 ** 3 ? `${whole.format(b / 1024 ** 2)} MB` : gb(b);
+// A length of time in seconds, said the short way: "3d 4h", "2h 5m", "12m".
+function dur(s) {
+  s = Math.max(0, s);
   const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
   return d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : m ? `${m}m` : `${Math.floor(s)}s`;
 }
-// Image ages run to years, where "454d 21h" says less than "1 year".
+const ago = (iso) => !iso || iso.startsWith("0001") ? "" : dur((Date.now() - new Date(iso)) / 1000);
+// Image ages run to years, where "454d 21h" says less than "1.2 years".
 function longAgo(iso) {
   const d = (Date.now() - new Date(iso)) / 86400000;
   if (d < 60) return ago(iso);
@@ -161,87 +314,72 @@ function longAgo(iso) {
   return `${y} year${y === 1 ? "" : "s"}`;
 }
 const working = (a) => !!a.busy && !a.busy.startsWith("error");
+const lit = (a) => a.state === "on" || a.state === "partial";
 
+// ---- the question sheet and the toast, in place of the browser's own popups
+let answer = null;
+function ask(title, message, ok, danger = false) {
+  $("ask-t").textContent = title;
+  $("ask-m").textContent = message || "";
+  $("ask-ok").textContent = ok;
+  $("ask-ok").className = "press" + (danger ? " danger" : "");
+  show("ask", true);
+  $(danger ? "ask-no" : "ask-ok").focus({ preventScroll: true });
+  return new Promise((res) => { answer = res; });
+}
+function settle(v) { if (!answer) return; const r = answer; answer = null; show("ask", false); r(v); }
+$("ask-ok").onclick = () => settle(true);
+$("ask-no").onclick = () => settle(false);
+
+let toastTimer;
+function toast(msg) {
+  $("toast").textContent = msg;
+  $("toast").classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $("toast").classList.remove("show"), 4000);
+}
+
+let lastFocus = null;
+function show(id, on) {
+  if (on) lastFocus = document.activeElement;
+  $(id).classList.toggle("show", on);
+  $("scrim").classList.toggle("show", ["ask", "logs"].some((s) => $(s).classList.contains("show")));
+  document.body.style.overflow = $("scrim").classList.contains("show") ? "hidden" : "";
+  for (const s of ["ask", "logs"]) $(s).inert = !$(s).classList.contains("show");
+  if (!on && lastFocus) lastFocus.focus?.({ preventScroll: true });
+}
+$("ask").inert = $("logs").inert = true;
+$("scrim").onclick = () => { if (answer) settle(false); else closeLogs(); };
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { if (answer) settle(false); else if (logName) closeLogs(); } });
+
+// ---- actions
 async function act(app, action) {
-  if (action === "off" && !confirm(`Stop ${app.label}?`)) return;
-  if (action === "restart" && !confirm(`Restart ${app.label}?`)) return;
+  if (action === "off" && !await ask(`Stop ${app.label}?`, "Its containers stop. Data and settings are kept.", "Stop", true)) return;
+  if (action === "restart" && !await ask(`Restart ${app.label}?`, "It’s unavailable for a few seconds.", "Restart")) return;
   // GPU apps share the card's memory; a second one can run either out of it.
   if (action === "on" && app.gpu_clash.length &&
-      !confirm(`${app.gpu_clash.join(" and ")} ${app.gpu_clash.length > 1 ? "are" : "is"} already on the GPU (${gpuLine(state.host.gpu)}). ` +
-               `${app.label} uses it too, and both may not fit. Start ${app.label} anyway?`)) return;
-  if (action === "update" && !confirm(`Update ${app.label}? This downloads the newer image for ${app.updates.join(", ")} ` +
-                                      `and recreates its containers. Data and settings are kept.`)) return;
-  const r = await post(`/api/apps/${app.id}/${action}`);
-  if (r.status === 409) alert(`${app.label} is still busy. Try again in a few seconds.`);
+      !await ask(`Start ${app.label}?`, `${app.gpu_clash.join(" and ")} ${app.gpu_clash.length > 1 ? "are" : "is"} already on the GPU (${gpuLine(state.host.gpu)}). ` +
+                 `${app.label} uses it too, and both may not fit.`, "Start Anyway")) return;
+  if (action === "update" && !await ask(`Update ${app.label}?`, `Downloads the newer image for ${app.updates.join(", ")} ` +
+                                        `and recreates its containers. Data and settings are kept.`, "Update")) return;
+  try {
+    const r = await post(`/api/apps/${app.id}/${action}`);
+    if (r.status === 409) toast(`${app.label} is still busy. Try again in a few seconds.`);
+  } catch { toast("Can’t reach the PC right now."); }
   refresh();
 }
 
 async function restartContainer(name) {
-  if (!confirm(`Restart ${name}?`)) return;
-  const r = await post(`/api/containers/${encodeURIComponent(name)}/restart`);
-  if (r.status === 409) alert("That app is still busy. Try again in a few seconds.");
+  if (!await ask(`Restart ${name}?`, "", "Restart")) return;
+  try {
+    const r = await post(`/api/containers/${encodeURIComponent(name)}/restart`);
+    if (r.status === 409) toast("That app is still busy. Try again in a few seconds.");
+  } catch { toast("Can’t reach the PC right now."); }
   refresh();
 }
 
-// ---- host
-function bar(pct) {
-  const b = el("div", "bar"), i = el("i", pct > 90 ? "bad" : pct > 75 ? "warn" : "");
-  i.style.width = Math.min(100, pct) + "%"; b.append(i); return b;
-}
-function stat(k, v, pct) {
-  const s = el("div", "stat"); s.append(el("div", "k", k), el("div", "v", v));
-  if (pct != null) s.append(bar(pct));
-  return s;
-}
-function renderHost(h) {
-  const grid = el("div", "host");
-  grid.append(stat("CPU", h.cpu == null ? "…" : `${h.cpu}%`, h.cpu ?? 0));
-  const of = (used, total) => `${(used / 1024 ** 3).toFixed(1)} / ${gb(total)}`;
-  grid.append(stat("Memory", of(h.mem.used, h.mem.total), 100 * h.mem.used / h.mem.total));
-  if (h.gpu) grid.append(stat("GPU", of(h.gpu.used, h.gpu.total), 100 * h.gpu.used / h.gpu.total));
-  for (const d of h.disks) grid.append(stat(d.label, `${gb(d.total - d.used)} free`, 100 * d.used / d.total));
-  const up = ago(new Date(Date.now() - h.uptime * 1000).toISOString());
-  const lines = [el("div", "hostline", `${h.name} · up ${up} · load ${h.load.map((x) => x.toFixed(2)).join(" ")} · ${h.cores} cores`)];
-  if (h.gpu) {
-    const extra = [h.gpu.util != null && `${h.gpu.util}% busy`, h.gpu.temp != null && `${h.gpu.temp}°C`].filter(Boolean);
-    lines.push(el("div", "hostline", [`GPU: ${gpuLine(h.gpu)}`, ...extra].join(" · ")));
-  }
-  if (h.docker) {
-    const d = h.docker, bits = [`Docker: ${gb(d.images)} of images`];
-    // Unique size: what removing them frees. Layers they share with images in use stay.
-    if (d.unused) bits.push(`${d.unused} unused (removing frees ~${size(d.unused_bytes)})`);
-    if (d.cache > 100 * 1024 ** 2) bits.push(`${size(d.cache)} build cache`);
-    lines.push(el("div", "hostline", bits.join(" · ")));
-  }
-  const backup = backupLine(h.backup);
-  // One quiet line: uptime and backup. Load, GPU users and Docker disk sit behind a tap.
-  const sum = el("button", "hostsum");
-  sum.setAttribute("aria-expanded", hostMore);
-  const text = el("span", "grow"); text.append(`Up ${up} · `);
-  if (backup) text.append(backup); else text.append("No backup set up");
-  sum.append(text, el("span", "chev", "›"));
-  sum.onclick = () => { hostMore = !hostMore; try { localStorage.setItem("dock.hostmore", hostMore ? "1" : ""); } catch {} render(); };
-  const more = el("div", "hostmore"); more.append(...lines);
-  $("host").classList.toggle("more", hostMore);
-  $("host").replaceChildren(grid, sum, more);
-}
-function gpuLine(g) {
-  if (!g || !g.users.length) return "nothing loaded";
-  return g.users.map((u) => `${u.label} ${size(u.mem)}`).join(", ");
-}
-// The backup timer runs nightly, so past 36 hours a run has been missed or has failed.
-function backupLine(b) {
-  if (!b) return null;
-  if (b.age == null) return el("span", "warn", "No backup yet");
-  const when = ago(new Date(Date.now() - b.age * 1000).toISOString());
-  const late = b.age > 36 * 3600;
-  const problem = late ? ", overdue" : b.warnings ? `, ${b.warnings} warning${b.warnings > 1 ? "s" : ""}` : "";
-  return el("span", problem ? "warn" : "", `Backed up ${when} ago${problem}`);
-}
-
-// ---- desktop programs
 async function program(p, action) {
-  if (action === "close" && !confirm(`Close ${p.label} on the PC?`)) return;
+  if (action === "close" && !await ask(`Close ${p.label} on the PC?`, "Anything unsaved in it may be lost.", "Close", true)) return;
   pending.add(p.id);
   render();
   // Programs take a few seconds to show up; keep the button dimmed until the next polls catch it.
@@ -250,40 +388,97 @@ async function program(p, action) {
     const r = await post(`/api/programs/${p.id}/${action}`);
     if (!r.ok) {
       const e = await r.json().catch(() => ({}));
-      alert(`Couldn't ${action} ${p.label}: ${e.error || r.status}`);
-    }
-  } catch { alert(`Couldn't reach the PC to ${action} ${p.label}.`); }
+      toast(`Couldn’t ${action} ${p.label}: ${e.error || r.status}`);
+    } else if (action === "later") toast(`${p.label} stays open another hour.`);
+  } catch { toast(`Couldn’t reach the PC to ${action === "later" ? "keep" : action} ${p.label}.`); }
   refresh();
 }
 
-function renderPrograms(progs) {
-  $("progs-h").hidden = $("progs").hidden = !progs.length;
-  $("progs").replaceChildren(...progs.map((p) => {
-    const li = el("li", "prog");
-    const info = el("div", "info");
-    const left = p.closes_in != null && `closes in ${p.closes_in < 3600 ? Math.ceil(p.closes_in / 60) + " min" : ago(new Date(Date.now() - p.closes_in * 1000).toISOString())}`;
-    info.append(el("div", "name", p.label), el("div", "sub", p.running ? `Open · ${left || p.note}` : p.note));
-    const b = el("button", "pill" + (p.running ? "" : " blue"), p.running ? "Close" : "Open");
-    b.disabled = pending.has(p.id);
-    b.onclick = () => program(p, p.running ? "close" : "open");
-    li.append(el("span", "dot" + (p.running ? " on" : "")), info);
-    // Auto-closing soon but still in use? Push it back an hour.
-    if (left) { const l = el("button", "pill", "+1 hour"); l.onclick = () => program(p, "later"); li.append(l); }
-    li.append(b);
-    return li;
-  }));
+// ---- this computer
+function tile(k, v, unit, detail, pct, span) {
+  const t = el("div", "tile");
+  t.style.setProperty("--span", span);
+  const val = el("div", "v num", v);
+  if (unit) val.append(el("small", null, unit));
+  t.append(el("div", "k", k), val);
+  if (detail) t.append(el("div", "d num", detail));
+  if (pct != null) {
+    const m = el("div", "meter"), i = el("i", pct > 90 ? "bad" : pct > 75 ? "warn" : "");
+    i.style.setProperty("--p", Math.min(1, Math.max(0, pct / 100)));
+    m.append(i); t.append(m);
+  }
+  return t;
+}
+function renderHost(h) {
+  $("hostname").textContent = h.name;
+  // Live readings on the first row, storage on the second, so each row reads as one idea.
+  const live = [
+    tile("CPU", h.cpu == null ? "…" : whole.format(h.cpu), h.cpu == null ? "" : "%", `${h.cores} cores`, h.cpu ?? 0),
+    tile("Memory", whole.format(100 * h.mem.used / h.mem.total), "%", `${gb(h.mem.used)} of ${gb(h.mem.total)}`, 100 * h.mem.used / h.mem.total),
+  ];
+  if (h.gpu) live.push(tile("GPU", whole.format(100 * h.gpu.used / h.gpu.total), "%", `${gb(h.gpu.used)} of ${gb(h.gpu.total)}`, 100 * h.gpu.used / h.gpu.total));
+  live.forEach((t) => t.style.setProperty("--span", 6 / live.length));
+  const disks = h.disks.map((d) => {
+    const [free, unit] = gbParts(d.total - d.used);
+    const t = tile(d.label, free, ` ${unit} free`, `of ${gb(d.total)}`, 100 * d.used / d.total, 6 / Math.min(h.disks.length, 3));
+    t.classList.add("wide");
+    return t;
+  });
+  $("tiles").replaceChildren(...live, ...disks);
+
+  const up = dur(h.uptime);
+  const lines = [];
+  const add = (k, v) => { const d = el("div"); d.append(el("b", null, k + "  "), v); lines.push(d); };
+  add("Uptime", `${up} · load ${h.load.map((x) => x.toFixed(2)).join(", ")}`);
+  if (h.gpu) {
+    const extra = [h.gpu.util != null && `${h.gpu.util}% busy`, h.gpu.temp != null && `${h.gpu.temp}°C`].filter(Boolean);
+    add("GPU", [gpuLine(h.gpu), ...extra].join(" · "));
+  }
+  if (h.docker) {
+    const d = h.docker, bits = [`${gb(d.images)} of images`];
+    // Unique size: what removing them frees. Layers they share with images in use stay.
+    if (d.unused) bits.push(`${d.unused} unused, ~${size(d.unused_bytes)} to free`);
+    if (d.cache > 100 * 1024 ** 2) bits.push(`${size(d.cache)} build cache`);
+    add("Docker", bits.join(" · "));
+  }
+  // One quiet line: uptime and backup. Load, GPU users and Docker disk sit behind a tap.
+  const sum = el("button", "hostsum press");
+  sum.setAttribute("aria-expanded", hostMore);
+  const text = el("span", "grow num"); text.append(`Up ${up} · `, backupLine(h.backup));
+  sum.append(text, el("span", "chev"));
+  sum.onclick = () => { hostMore = !hostMore; store.set("dock.hostmore", hostMore ? "1" : ""); render(); };
+  const box = el("div", "hostmore");
+  box.append(...lines);
+  const wrap = el("div", "card"); wrap.style.marginTop = "10px";
+  wrap.id = "hostmore"; wrap.append(box);
+  $("hostsum").replaceChildren(sum, ...(hostMore ? [wrap] : []));
+}
+function gpuLine(g) {
+  if (!g || !g.users.length) return "nothing loaded";
+  return g.users.map((u) => `${u.label} ${size(u.mem)}`).join(", ");
+}
+// The backup timer runs nightly, so past 36 hours a run has been missed or has failed.
+function backupLine(b) {
+  if (!b) return "No backup set up";
+  if (b.age == null) return el("span", "warn", "No backup yet");
+  const late = b.age > 36 * 3600;
+  const problem = late ? ", overdue" : b.warnings ? `, ${b.warnings} warning${b.warnings > 1 ? "s" : ""}` : "";
+  return el("span", problem ? "warn" : "", `Backed up ${dur(b.age)} ago${problem}`);
 }
 
 // ---- apps
+function iconFor(label, cls) { return el("span", "icon " + (cls || ""), (label.trim()[0] || "?").toUpperCase()); }
+
 function subline(a) {
   const sub = el("div", "sub");
   if (a.busy && a.busy.startsWith("error")) { sub.className += " err"; sub.textContent = a.busy; }
-  else if (working(a)) sub.textContent = a.busy[0].toUpperCase() + a.busy.slice(1) + "…";
-  else if (a.state === "partial") { sub.className += " warn"; sub.textContent = `${a.running}/${a.total} running · down: ${a.down.join(", ")}`; }
-  else if (a.state === "missing") sub.textContent = "Not created yet · flip to create";
+  else if (working(a)) sub.append(el("span", "act", a.busy[0].toUpperCase() + a.busy.slice(1) + "…"));
+  else if (a.state === "partial") sub.append(el("span", "warn", `${a.running} of ${a.total} running`), ` · ${a.down.join(", ")} down`);
+  else if (a.state === "missing") sub.textContent = "Not created yet · switch on to create";
   else {
-    sub.textContent = (a.state === "on" ? `${a.total} container${a.total > 1 ? "s" : ""} · ` : "") + a.note;
-    if (a.updates.length && a.can_update) sub.prepend(el("span", "upd", "Update available · "));
+    if (a.state === "on") sub.append(el("span", "ok", "Running"), " · ");
+    if (a.updates.length && a.can_update) sub.append(el("span", "act", "Update available"), " · ");
+    sub.append(a.note);
   }
   return sub;
 }
@@ -292,27 +487,35 @@ function containerItem(a, c) {
   const it = el("div", "item");
   const dot = el("span", "dot" + (!c.running ? "" : c.health === "unhealthy" ? " bad" : c.health === "starting" ? " warn" : " on"));
   const info = el("div", "info");
-  info.append(el("div", "name", c.name));
+  info.append(el("div", "name mono", c.name));
   const bits = [];
   if (c.running) {
-    bits.push(`up ${ago(c.started)}`);
+    bits.push(`Up ${ago(c.started)}`);
     if (c.health) bits.push(c.health);
     if (c.cpu) bits.push(`${c.cpu} CPU`);
     if (c.mem) bits.push(c.mem);
   } else {
-    bits.push(c.state + (c.exit ? ` (code ${c.exit})` : "") + (ago(c.finished) ? ` ${ago(c.finished)} ago` : ""));
+    bits.push(c.state[0].toUpperCase() + c.state.slice(1) + (c.exit ? ` (code ${c.exit})` : "") + (ago(c.finished) ? ` ${ago(c.finished)} ago` : ""));
   }
   if (c.restarts) bits.push(`${c.restarts} restarts`);
-  const sub = el("div", "sub", bits.join(" · "));
-  info.append(sub);
+  info.append(el("div", "sub num", bits.join(" · ")));
   if (c.error) info.append(el("div", "sub err", c.error));
   info.append(el("div", "sub mono", c.image));
   if (c.built) info.append(el("div", "sub", `Image built ${longAgo(c.built)} ago`));
-  if (c.update) info.append(el("div", "sub upd", "Newer image available"));
-  const logs = el("button", "pill", "Logs"); logs.onclick = () => openLogs(c.name);
-  const rs = el("button", "pill", "Restart"); rs.disabled = working(a) || !c.running; rs.onclick = () => restartContainer(c.name);
+  if (c.update) info.append(el("div", "sub act", "Newer image available"));
+  const logs = el("button", "btn press", "Logs"); logs.onclick = () => openLogs(c.name);
+  logs.setAttribute("aria-label", `Logs for ${c.name}`);
+  const rs = el("button", "btn press", "Restart"); rs.disabled = working(a) || !c.running; rs.onclick = () => restartContainer(c.name);
+  rs.setAttribute("aria-label", `Restart ${c.name}`);
   it.append(dot, info, logs, rs);
   return it;
+}
+
+function openLink(href, label, cls) {
+  const o = el("a", "btn press " + cls, "Open");
+  o.href = href; o.target = "_blank"; o.rel = "noopener";
+  o.setAttribute("aria-label", `Open ${label}`);
+  return o;
 }
 
 function linkItem(w) {
@@ -320,51 +523,87 @@ function linkItem(w) {
   const info = el("div", "info");
   info.append(el("div", "name", w.label));
   const u = w.phone && new URL(w.phone);
-  info.append(el("div", "sub mono", u ? `Phone: ${u.protocol.slice(0, -1)} · ${u.port ? "port " + u.port : "main address"}` : "Phone: PC only"));
-  info.append(el("div", "sub mono", `PC: ${w.pc.replace(/^https?:\/\//, "")}`));
+  info.append(el("div", "sub", u ? `Phone: ${u.port ? "port " + u.port : "main address"}` : "Only on the PC"));
+  info.append(el("div", "sub mono", w.pc.replace(/^https?:\/\//, "")));
   it.append(el("span", "dot" + (w.up ? " on" : "")), info);
-  if (w.phone) { const o = el("a", "pill blue", "Open"); o.href = w.phone; o.target = "_blank"; o.rel = "noopener"; it.append(o); }
+  if (w.phone) it.append(openLink(w.phone, w.label, "primary"));
   return it;
 }
 
 function renderApps(apps) {
+  const on = apps.filter(lit).length;
+  $("appcount").textContent = `${on} of ${apps.length} on`;
   $("list").replaceChildren(...apps.map((a) => {
-    const li = el("li", "app" + (opened.has(a.id) ? " open" : ""));
+    const isOpen = opened.has(a.id);
+    const li = el("li", "app" + (isOpen ? " open" : ""));
     const row = el("div", "row");
+    const err = a.busy && a.busy.startsWith("error");
     const ex = el("button", "expand");
-    ex.setAttribute("aria-expanded", opened.has(a.id));
-    const info = el("div", "info"); info.append(el("div", "name", a.label), subline(a));
-    ex.append(el("span", "chev", "›"), info);
-    ex.onclick = () => { opened.has(a.id) ? opened.delete(a.id) : opened.add(a.id); saveOpen(); render(); };
-    const sw = el("button", "sw" + (a.state === "on" || a.state === "partial" ? " " + a.state : "") + (working(a) ? " busy" : ""));
+    ex.setAttribute("aria-expanded", isOpen);
+    const name = el("div", "name", a.label); name.append(el("span", "chev"));
+    const info = el("div", "info"); info.append(name, subline(a));
+    ex.append(iconFor(a.label, err ? "bad" : a.state === "partial" ? "warn" : a.state === "on" ? "on" : ""), info);
+    ex.onclick = () => { isOpen ? opened.delete(a.id) : opened.add(a.id); store.set("dock.open", JSON.stringify([...opened])); render(); };
+    const sw = el("button", "sw" + (lit(a) ? " " + a.state : "") + (working(a) ? " busy" : ""));
     sw.setAttribute("role", "switch");
     sw.setAttribute("aria-checked", a.state === "on" ? "true" : a.state === "partial" ? "mixed" : "false");
     sw.setAttribute("aria-label", a.label);
     sw.disabled = working(a);
     // A lit switch (on, or partly on) turns the whole app off; a dark one turns it on.
-    sw.onclick = () => act(a, a.state === "on" || a.state === "partial" ? "off" : "on");
-    // The app's main page, right in the row once it's up; any others are under the chevron.
+    sw.onclick = () => act(a, lit(a) ? "off" : "on");
+    // The app's main page, right in the row once it's up; any others are in the details.
     const main = a.web.find((w) => w.exists && w.phone);
-    if (main && main.up) {
-      const o = el("a", "pill blue", "Open"); o.href = main.phone; o.target = "_blank"; o.rel = "noopener";
-      o.setAttribute("aria-label", `Open ${main.label}`);
-      row.append(ex, o, sw);
-    } else row.append(ex, sw);
+    row.append(ex);
+    if (main && main.up) row.append(openLink(main.phone, main.label, "tint"));
+    row.append(sw);
 
-    const det = el("div", "detail");
-    const shown = a.web.filter((w) => w.exists);
-    if (shown.length) { const g = el("div", "group"); g.append(...shown.map(linkItem)); det.append(g); }
-    if (a.containers.length) { const g = el("div", "group"); g.append(...a.containers.map((c) => containerItem(a, c))); det.append(g); }
-    const acts = el("div", "actions");
-    const rs = el("button", "pill", "Restart app"); rs.disabled = working(a) || a.state === "off" || a.state === "missing"; rs.onclick = () => act(a, "restart");
-    const st = el("button", "pill red", "Stop app"); st.disabled = working(a) || a.state === "off" || a.state === "missing"; st.onclick = () => act(a, "off");
-    if (a.updates.length && a.can_update) {
-      const up = el("button", "pill blue", "Update"); up.disabled = working(a); up.onclick = () => act(a, "update");
-      acts.append(up);
+    li.append(row);
+    if (isOpen) {  // details are only built while open; polls redraw every 3 seconds
+      const det = el("div", "detail"); det.id = `d-${a.id}`;
+      const shown = a.web.filter((w) => w.exists);
+      if (shown.length) { const g = el("div", "group"); g.append(...shown.map(linkItem)); det.append(g); }
+      if (a.containers.length) { const g = el("div", "group"); g.append(...a.containers.map((c) => containerItem(a, c))); det.append(g); }
+      const acts = el("div", "actions");
+      const cantAct = working(a) || a.state === "off" || a.state === "missing";
+      if (a.updates.length && a.can_update) {
+        const up = el("button", "btn primary press", "Update"); up.disabled = working(a); up.onclick = () => act(a, "update");
+        acts.append(up);
+      }
+      const rs = el("button", "btn press", "Restart App"); rs.disabled = cantAct; rs.onclick = () => act(a, "restart");
+      const st = el("button", "btn danger press", "Stop App"); st.disabled = cantAct; st.onclick = () => act(a, "off");
+      acts.append(rs, st);
+      det.append(acts);
+      li.append(det);
     }
-    acts.append(rs, st);
-    det.append(acts);
-    li.append(row, det);
+    return li;
+  }));
+}
+
+// ---- desktop programs
+function renderPrograms(progs) {
+  $("progs-sec").hidden = !progs.length;
+  $("progs").replaceChildren(...progs.map((p) => {
+    const li = el("li", "prog");
+    const info = el("div", "info");
+    const sub = el("div", "sub num");
+    if (p.running) {
+      sub.append(el("span", "ok", "Open"));
+      sub.append(` · ${p.closes_in != null ? `closes in ${p.closes_in < 3600 ? Math.ceil(p.closes_in / 60) + " min" : dur(p.closes_in)}` : p.note}`);
+    } else sub.textContent = p.note;
+    info.append(el("div", "name", p.label), sub);
+    const btns = el("div", "btns");
+    // On a timer but still in use? Push it back an hour.
+    if (p.running && p.closes_in != null) {
+      const l = el("button", "btn press", "+1 hour"); l.onclick = () => program(p, "later");
+      l.setAttribute("aria-label", `Keep ${p.label} open another hour`);
+      btns.append(l);
+    }
+    const b = el("button", "btn press " + (p.running ? "" : "primary"), pending.has(p.id) ? "…" : p.running ? "Close" : "Open");
+    b.disabled = pending.has(p.id);
+    b.setAttribute("aria-label", `${p.running ? "Close" : "Open"} ${p.label}`);
+    b.onclick = () => program(p, p.running ? "close" : "open");
+    btns.append(b);
+    li.append(iconFor(p.label, p.running ? "on" : ""), info, btns);
     return li;
   }));
 }
@@ -377,19 +616,26 @@ function render() {
   const foot = [];
   if (state.unlisted.length) foot.push(`Not in apps.yaml: ${state.unlisted.join(", ")}`);
   const checked = state.host.updates_checked;
-  foot.push(checked ? `Image updates checked ${ago(new Date(checked * 1000).toISOString())} ago` : "Image updates not checked yet");
+  foot.push(checked ? `Image updates checked ${dur(Date.now() / 1000 - checked)} ago` : "Image updates not checked yet");
   $("foot").textContent = foot.join(" · ");
 }
 
+const clock = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit", second: "2-digit" });
 async function refresh() {
   try {
     const r = await fetch("/api/state", { cache: "no-store" });
     if (!r.ok) throw new Error(r.status);
     state = await r.json();
     render();
-    $("offline").style.display = "none";
-    $("stamp").textContent = new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
-  } catch { $("offline").style.display = "block"; }
+    $("offline").classList.remove("show");
+    const busy = state.apps.filter(working).length;
+    const s = $("status"); s.replaceChildren();
+    if (busy) s.append(el("span", "live", `${busy} working…`), " · ");
+    s.append(`Updated ${clock.format(new Date())}`);
+  } catch {
+    $("offline").classList.add("show");
+    $("status").textContent = state ? "Showing the last known state" : "Can’t connect";
+  }
 }
 
 // ---- logs
@@ -399,8 +645,8 @@ async function loadLogs() {
   const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
   try {
     const r = await fetch(`/api/logs/${encodeURIComponent(logName)}?lines=${$("loglines").value}`, { cache: "no-store" });
-    pre.textContent = r.ok ? (await r.text()) || "(no output)" : `Couldn't load logs (${r.status}).`;
-  } catch { pre.textContent = "Couldn't reach the panel."; }
+    pre.textContent = r.ok ? (await r.text()) || "(no output)" : `Couldn’t load logs (${r.status}). Tap Refresh to try again.`;
+  } catch { pre.textContent = "Can’t reach the PC. Tap Refresh to try again."; }
   if (atBottom || !pre.dataset.loaded) pre.scrollTop = pre.scrollHeight;
   pre.dataset.loaded = "1";
 }
@@ -408,23 +654,33 @@ function openLogs(name) {
   logName = name;
   $("logtitle").textContent = name;
   $("logtext").textContent = "Loading…"; delete $("logtext").dataset.loaded;
-  $("sheet").classList.add("show");
-  document.body.style.overflow = "hidden";
+  show("logs", true);
+  $("logclose").focus({ preventScroll: true });
   loadLogs();
 }
-$("logclose").onclick = () => { $("sheet").classList.remove("show"); document.body.style.overflow = ""; logName = null; };
+function closeLogs() { if (!logName) return; logName = null; show("logs", false); }
+$("logclose").onclick = closeLogs;
 $("logrefresh").onclick = loadLogs;
 $("loglines").onchange = () => { delete $("logtext").dataset.loaded; loadLogs(); };
 
 $("all-on").onclick = async () => {
   const gpuApps = (state?.apps || []).filter((a) => a.gpu).map((a) => a.label);
-  if (gpuApps.length > 1 && !confirm(`Start all turns on ${gpuApps.join(" and ")}, which share the GPU and may not fit together. Start all anyway?`)) return;
-  await post("/api/apps/all/on"); refresh();
+  if (gpuApps.length > 1 && !await ask("Start every app?", `${gpuApps.join(" and ")} share the GPU and may not fit together.`, "Start All")) return;
+  try { await post("/api/apps/all/on"); } catch { toast("Can’t reach the PC right now."); }
+  refresh();
 };
-$("all-off").onclick = async () => { if (confirm("Stop every app?")) { await post("/api/apps/all/off"); refresh(); } };
+$("all-off").onclick = async () => {
+  if (!await ask("Stop every app?", "Data and settings are kept.", "Stop All", true)) return;
+  try { await post("/api/apps/all/off"); } catch { toast("Can’t reach the PC right now."); }
+  refresh();
+};
+
+// The small title bar fades in once the big title scrolls away.
+new IntersectionObserver(([e]) => $("bar").classList.toggle("show", !e.isIntersecting), { rootMargin: "-40px 0px 0px 0px" }).observe($("title"));
+
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 refresh();
-setInterval(() => { if (!document.hidden && !logName) refresh(); }, 3000);
+setInterval(() => { if (!document.hidden && !logName && !answer) refresh(); }, 3000);
 setInterval(() => { if (!document.hidden && logName) loadLogs(); }, 5000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 </script>
