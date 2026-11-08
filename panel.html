@@ -32,21 +32,20 @@
   /* host */
   .host { display:grid; grid-template-columns:repeat(auto-fit, minmax(110px, 1fr)); gap:14px 16px; padding:14px 16px; }
   .stat .k { color:var(--muted); font-size:12px; }
-  .stat .v { font-weight:600; font-variant-numeric:tabular-nums; }
+  .stat .v { font-weight:600; font-variant-numeric:tabular-nums; white-space:nowrap; }
   .bar { height:4px; border-radius:2px; background:var(--fill); margin-top:5px; overflow:hidden; }
   .bar i { display:block; height:100%; background:var(--on); border-radius:2px; }
   .bar i.warn { background:var(--warn); } .bar i.bad { background:var(--bad); }
-  .hostline { color:var(--muted); font-size:13px; padding:0 16px 12px; margin-top:-4px; }
+  .hostsum { display:flex; align-items:center; gap:6px; width:100%; border:0; border-top:1px solid var(--line); background:none;
+             padding:11px 16px; color:var(--muted); font-size:13px; text-align:left; cursor:pointer; }
+  .hostsum .grow { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .hostsum .warn { color:var(--warn); }
+  #host.more .hostsum .chev { transform:rotate(90deg); }
+  .hostmore { display:none; padding:0 16px 12px; }
+  #host.more .hostmore { display:block; }
+  .hostline { color:var(--muted); font-size:13px; padding:3px 0; }
   .hostline.warn { color:var(--warn); }
 
-  /* quick open */
-  .tiles { display:grid; grid-template-columns:repeat(2, 1fr); gap:10px; }
-  .tile { display:flex; flex-direction:column; gap:2px; min-height:64px; padding:12px 14px; border:0; border-radius:14px; background:var(--card);
-          text-align:left; text-decoration:none; color:var(--text); cursor:pointer; }
-  .tile .t { font-weight:600; display:flex; align-items:center; gap:7px; }
-  .tile .s { color:var(--muted); font-size:12px; }
-  .tile.down { opacity:.55; }
-  .pconly { color:var(--muted); font-size:13px; margin:10px 4px 0; }
   .dot { width:8px; height:8px; border-radius:50%; background:var(--off); flex:none; }
   .dot.on { background:var(--on); } .dot.warn { background:var(--warn); } .dot.bad { background:var(--bad); }
 
@@ -88,6 +87,9 @@
   .pill:disabled { opacity:.4; }
   .actions { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
 
+  .prog { display:flex; align-items:center; gap:12px; padding:12px 16px; min-height:60px; }
+  .prog + .prog { border-top:1px solid var(--line); }
+  .prog .pill { min-width:72px; justify-content:center; }
   .bulk { display:flex; gap:10px; margin-top:16px; }
   .bulk button { flex:1; min-height:48px; border:0; border-radius:12px; background:var(--card); font-weight:600; cursor:pointer; }
   .bulk button.stop { color:var(--bad); }
@@ -103,7 +105,7 @@
   #sheet select { font:inherit; font-size:14px; border:0; border-radius:8px; background:var(--fill); color:var(--text); min-height:34px; padding:0 8px; }
   #logtext { flex:1; margin:0; overflow:auto; padding:12px 16px; background:var(--code); white-space:pre-wrap; word-break:break-word;
              font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; -webkit-overflow-scrolling:touch; }
-  @media (prefers-reduced-motion: reduce) { button.sw, button.sw::after, .chev { transition:none; } button.sw.busy { animation:none; } }
+  @media (prefers-reduced-motion: reduce) { button.sw, button.sw::after, .chev, .hostsum .chev { transition:none; } button.sw.busy { animation:none; } }
 </style>
 <script src="/lock.js" data-name="Docker" data-setup="dock password"></script>
 </head>
@@ -111,12 +113,11 @@
 <main>
   <header><h1>Docker</h1><span id="stamp"></span></header>
   <section class="card" id="host"></section>
-  <h2>Open</h2>
-  <div class="tiles" id="tiles"></div>
-  <p class="pconly" id="pconly"></p>
   <h2>Apps</h2>
   <ul class="card" id="list"></ul>
   <div class="bulk"><button id="all-on">Start all</button><button id="all-off" class="stop">Stop all</button></div>
+  <h2 id="progs-h">On this PC</h2>
+  <ul class="card" id="progs"></ul>
   <p id="offline">Can't reach the panel. Is the computer awake and on Tailscale?</p>
   <p class="foot" id="foot"></p>
 </main>
@@ -137,6 +138,8 @@ const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls)
 const post = (path) => fetch(path, { method: "POST", headers: { "X-Dock": "1" } });
 const opened = new Set(JSON.parse(localStorageGet("dock.open") || "[]"));
 let state = null;
+let hostMore = !!localStorageGet("dock.hostmore");
+const pending = new Set();  // programs just asked to open or close
 
 function localStorageGet(k) { try { return localStorage.getItem(k); } catch { return null; } }
 function saveOpen() { try { localStorage.setItem("dock.open", JSON.stringify([...opened])); } catch {} }
@@ -193,12 +196,12 @@ function stat(k, v, pct) {
 function renderHost(h) {
   const grid = el("div", "host");
   grid.append(stat("CPU", h.cpu == null ? "…" : `${h.cpu}%`, h.cpu ?? 0));
-  grid.append(stat("Memory", `${gb(h.mem.used)} / ${gb(h.mem.total)}`, 100 * h.mem.used / h.mem.total));
-  if (h.gpu) grid.append(stat("GPU", `${size(h.gpu.used)} / ${gb(h.gpu.total)}`, 100 * h.gpu.used / h.gpu.total));
+  const of = (used, total) => `${(used / 1024 ** 3).toFixed(1)} / ${gb(total)}`;
+  grid.append(stat("Memory", of(h.mem.used, h.mem.total), 100 * h.mem.used / h.mem.total));
+  if (h.gpu) grid.append(stat("GPU", of(h.gpu.used, h.gpu.total), 100 * h.gpu.used / h.gpu.total));
   for (const d of h.disks) grid.append(stat(d.label, `${gb(d.total - d.used)} free`, 100 * d.used / d.total));
   const up = ago(new Date(Date.now() - h.uptime * 1000).toISOString());
-  const line = el("div", "hostline", `${h.name} · up ${up} · load ${h.load.map((x) => x.toFixed(2)).join(" ")} · ${h.cores} cores`);
-  const lines = [line];
+  const lines = [el("div", "hostline", `${h.name} · up ${up} · load ${h.load.map((x) => x.toFixed(2)).join(" ")} · ${h.cores} cores`)];
   if (h.gpu) {
     const extra = [h.gpu.util != null && `${h.gpu.util}% busy`, h.gpu.temp != null && `${h.gpu.temp}°C`].filter(Boolean);
     lines.push(el("div", "hostline", [`GPU: ${gpuLine(h.gpu)}`, ...extra].join(" · ")));
@@ -210,7 +213,17 @@ function renderHost(h) {
     if (d.cache > 100 * 1024 ** 2) bits.push(`${size(d.cache)} build cache`);
     lines.push(el("div", "hostline", bits.join(" · ")));
   }
-  $("host").replaceChildren(grid, ...lines, ...backupLine(h.backup));
+  const backup = backupLine(h.backup);
+  // One quiet line: uptime and backup. Load, GPU users and Docker disk sit behind a tap.
+  const sum = el("button", "hostsum");
+  sum.setAttribute("aria-expanded", hostMore);
+  const text = el("span", "grow"); text.append(`Up ${up} · `);
+  if (backup) text.append(backup); else text.append("No backup set up");
+  sum.append(text, el("span", "chev", "›"));
+  sum.onclick = () => { hostMore = !hostMore; try { localStorage.setItem("dock.hostmore", hostMore ? "1" : ""); } catch {} render(); };
+  const more = el("div", "hostmore"); more.append(...lines);
+  $("host").classList.toggle("more", hostMore);
+  $("host").replaceChildren(grid, sum, more);
 }
 function gpuLine(g) {
   if (!g || !g.users.length) return "nothing loaded";
@@ -218,30 +231,47 @@ function gpuLine(g) {
 }
 // The backup timer runs nightly, so past 36 hours a run has been missed or has failed.
 function backupLine(b) {
-  if (!b) return [];
-  if (b.age == null) return [el("div", "hostline warn", "Backup: none yet")];
+  if (!b) return null;
+  if (b.age == null) return el("span", "warn", "No backup yet");
   const when = ago(new Date(Date.now() - b.age * 1000).toISOString());
   const late = b.age > 36 * 3600;
   const problem = late ? ", overdue" : b.warnings ? `, ${b.warnings} warning${b.warnings > 1 ? "s" : ""}` : "";
-  return [el("div", problem ? "hostline warn" : "hostline", `Backup: ${when} ago${problem}`)];
+  return el("span", problem ? "warn" : "", `Backed up ${when} ago${problem}`);
 }
 
-// ---- quick open
-function renderTiles(apps) {
-  const tiles = [], pcOnly = [];
-  for (const a of apps) for (const w of a.web) {
-    if (!w.exists) continue;
-    if (!w.phone) { pcOnly.push(`${w.label} (${w.pc.replace(/^http:\/\/|\/$/g, "")})`); continue; }
-    const t = el("a", "tile" + (w.up ? "" : " down"));
-    t.href = w.phone; t.target = "_blank"; t.rel = "noopener";
-    const title = el("div", "t"); title.append(el("span", "dot" + (w.up ? " on" : "")), el("span", null, w.label));
-    const port = new URL(w.phone).port;
-    t.append(title, el("div", "s", w.up ? (port ? `port ${port}` : "main address") : `${a.label} is off · tap to start`));
-    if (!w.up) t.onclick = (e) => { e.preventDefault(); if (!working(a)) act(a, "on"); };
-    tiles.push(t);
-  }
-  $("tiles").replaceChildren(...tiles);
-  $("pconly").textContent = pcOnly.length ? `Only on the PC: ${pcOnly.join(", ")}` : "";
+// ---- desktop programs
+async function program(p, action) {
+  if (action === "close" && !confirm(`Close ${p.label} on the PC?`)) return;
+  pending.add(p.id);
+  render();
+  // Programs take a few seconds to show up; keep the button dimmed until the next polls catch it.
+  setTimeout(() => { pending.delete(p.id); refresh(); }, 4000);
+  try {
+    const r = await post(`/api/programs/${p.id}/${action}`);
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      alert(`Couldn't ${action} ${p.label}: ${e.error || r.status}`);
+    }
+  } catch { alert(`Couldn't reach the PC to ${action} ${p.label}.`); }
+  refresh();
+}
+
+function renderPrograms(progs) {
+  $("progs-h").hidden = $("progs").hidden = !progs.length;
+  $("progs").replaceChildren(...progs.map((p) => {
+    const li = el("li", "prog");
+    const info = el("div", "info");
+    const left = p.closes_in != null && `closes in ${p.closes_in < 3600 ? Math.ceil(p.closes_in / 60) + " min" : ago(new Date(Date.now() - p.closes_in * 1000).toISOString())}`;
+    info.append(el("div", "name", p.label), el("div", "sub", p.running ? `Open · ${left || p.note}` : p.note));
+    const b = el("button", "pill" + (p.running ? "" : " blue"), p.running ? "Close" : "Open");
+    b.disabled = pending.has(p.id);
+    b.onclick = () => program(p, p.running ? "close" : "open");
+    li.append(el("span", "dot" + (p.running ? " on" : "")), info);
+    // Auto-closing soon but still in use? Push it back an hour.
+    if (left) { const l = el("button", "pill", "+1 hour"); l.onclick = () => program(p, "later"); li.append(l); }
+    li.append(b);
+    return li;
+  }));
 }
 
 // ---- apps
@@ -313,7 +343,13 @@ function renderApps(apps) {
     sw.disabled = working(a);
     // A lit switch (on, or partly on) turns the whole app off; a dark one turns it on.
     sw.onclick = () => act(a, a.state === "on" || a.state === "partial" ? "off" : "on");
-    row.append(ex, sw);
+    // The app's main page, right in the row once it's up; any others are under the chevron.
+    const main = a.web.find((w) => w.exists && w.phone);
+    if (main && main.up) {
+      const o = el("a", "pill blue", "Open"); o.href = main.phone; o.target = "_blank"; o.rel = "noopener";
+      o.setAttribute("aria-label", `Open ${main.label}`);
+      row.append(ex, o, sw);
+    } else row.append(ex, sw);
 
     const det = el("div", "detail");
     const shown = a.web.filter((w) => w.exists);
@@ -336,8 +372,8 @@ function renderApps(apps) {
 function render() {
   if (!state) return;
   renderHost(state.host);
-  renderTiles(state.apps);
   renderApps(state.apps);
+  renderPrograms(state.programs || []);
   const foot = [];
   if (state.unlisted.length) foot.push(`Not in apps.yaml: ${state.unlisted.join(", ")}`);
   const checked = state.host.updates_checked;

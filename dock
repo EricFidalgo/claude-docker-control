@@ -9,16 +9,23 @@
   dock updates                ask each image's registry whether a newer image is out
   dock update  <app|all>      pull newer images and recreate the containers (data is kept)
   dock logs    <container> [lines]
+  dock open    <program>      open a desktop program from `programs:` (Chrome, LocalSend, ...) on this PC's screen
+  dock close   <program>      ask that program to quit
+  dock later   <program>      push its auto-close back an hour (programs with `close_after_hours`)
+  dock programs               list the desktop programs and whether each is open
   dock panel                  serve the phone panel on 127.0.0.1:<panel.port>
   dock password               set the ONE phone password shared by the panel, Money and VoiceStudio, 6+ numbers (also the way back in; turns Face ID off)
 
 The panel locks phone visits (those through `tailscale serve`) behind the password or Face ID; this PC
 needs no unlock. lock.py and lock.js are copies of the Money app's (finance_tracker/finance/), kept identical.
 """
+import contextlib
+import fcntl
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -44,6 +51,7 @@ if not (HERE / "apps.yaml").exists():
     sys.exit(f"No apps.yaml yet. Copy {HERE / 'apps.example.yaml'} to apps.yaml and list your apps in it.")
 CONFIG = yaml.safe_load((HERE / "apps.yaml").read_text())
 APPS = CONFIG["apps"]
+PROGRAMS = CONFIG.get("programs") or {}
 PANEL = CONFIG.get("panel", {})
 PORT = int(os.environ.get("DOCK_PORT") or PANEL.get("port", 9000))
 
@@ -501,6 +509,139 @@ def stats_loop():
         time.sleep(4)
 
 
+# ---- desktop programs ---------------------------------------------------------------------
+# Programs that aren't Docker apps but are handy to open from the phone, mainly Chrome so Claude
+# can browse while nobody is at the PC. They open on the logged-in desktop, so the PC must be
+# logged in (a locked screen is fine).
+
+def desktop_env():
+    """This shell's env, plus the desktop's DISPLAY and D-Bus when it lacks them (ssh, cron, cloud shells)."""
+    env = dict(os.environ)
+    if env.get("DISPLAY") or env.get("WAYLAND_DISPLAY"):
+        return env
+    r = sh(["systemctl", "--user", "show-environment"], check=False)
+    for line in r.stdout.splitlines():
+        k, _, v = line.partition("=")
+        if k in ("DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"):
+            env.setdefault(k, v)
+    return env
+
+
+WRAPPERS = {"bash", "sh", "dash", "zsh", "fish", "python3", "timeout", "sudo"}
+
+
+def program_pids(spec):
+    """PIDs matching `process`, oldest first. Skips shells and wrappers, whose command line can quote the pattern."""
+    pids = []
+    for pid in sh(["pgrep", "-f", spec["process"]], check=False).stdout.split():
+        try:
+            if Path(f"/proc/{pid}/comm").read_text().strip() in WRAPPERS:
+                continue
+            started = int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19])
+        except (OSError, ValueError, IndexError):
+            continue  # exited meanwhile
+        pids.append((started, int(pid)))
+    return [pid for _, pid in sorted(pids)]
+
+
+def program_running(spec):
+    return bool(program_pids(spec))
+
+
+# Programs with `close_after_hours` close themselves that long after the panel or `dock open` opened
+# them, so a forgotten Chrome doesn't sit on memory. One already open (say, from the PC's own menu)
+# gets no timer: it's someone's, and closing it would lose their work.
+TIMERS = Path.home() / ".local/state/dock/program-timers.json"
+STARTUP_GRACE = 120  # seconds a just-launched program gets to show up before "not running" means closed
+
+
+@contextlib.contextmanager
+def edit_timers():
+    """The timers, locked against the panel's threads and other `dock` runs; saved on exit.
+    Each entry is {"at": close time, "set": when the timer started}."""
+    TIMERS.parent.mkdir(parents=True, exist_ok=True)
+    with open(TIMERS.with_suffix(".lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        t = timers()
+        before = json.dumps(t, sort_keys=True)
+        yield t
+        if json.dumps(t, sort_keys=True) != before:
+            tmp = TIMERS.with_suffix(".tmp")
+            tmp.write_text(json.dumps(t))
+            os.replace(tmp, TIMERS)  # atomic, so a reader never sees a half-written file
+
+
+def timers():
+    try:
+        return json.loads(TIMERS.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def push_back(name, seconds=3600):
+    with edit_timers() as t:
+        if name not in t:
+            raise RuntimeError(f"{name} has no auto-close timer")
+        t[name]["at"] = max(t[name]["at"], time.time()) + seconds
+
+
+def timers_loop():
+    while True:
+        due = []
+        with edit_timers() as t:
+            for name, entry in list(t.items()):
+                spec = PROGRAMS.get(name)
+                if not spec or not isinstance(entry, dict):
+                    del t[name]
+                elif not program_running(spec):
+                    if time.time() - entry["set"] > STARTUP_GRACE:
+                        del t[name]  # closed by hand, so the timer is moot
+                elif time.time() >= entry["at"]:
+                    due.append(name)
+        for name in due:
+            print(f"auto-closing {name}", flush=True)
+            close_program(name)
+        time.sleep(60)
+
+
+def open_program(name):
+    """False when it was already open, so nothing was launched."""
+    spec = PROGRAMS[name]
+    if program_running(spec):
+        return False
+    env = desktop_env()
+    if not (env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")):
+        raise RuntimeError("no desktop session; log in on the PC first")
+    # Its own session, so restarting the panel doesn't take the program down with it.
+    subprocess.Popen(["gtk-launch", spec["launch"]], env=env, start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if spec.get("close_after_hours"):
+        now = time.time()
+        with edit_timers() as t:
+            t[name] = {"at": now + float(spec["close_after_hours"]) * 3600, "set": now}
+    return True
+
+
+def close_program(name):
+    # The oldest matching process is the main one; a polite TERM lets it save tabs and quit cleanly.
+    pids = program_pids(PROGRAMS[name])
+    if pids:
+        os.kill(pids[0], signal.SIGTERM)
+    with edit_timers() as t:
+        t.pop(name, None)
+
+
+def programs_state():
+    out = []
+    for n, s in PROGRAMS.items():
+        running = program_running(s)
+        entry = timers().get(n) if running else None
+        at = entry.get("at") if isinstance(entry, dict) else None
+        out.append({"id": n, "label": s.get("label", n), "note": s.get("note", ""), "running": running,
+                    "closes_in": max(0, int(at - time.time())) if at else None})
+    return out
+
+
 # ---- phone panel ---------------------------------------------------------------------------
 
 busy = {}  # app -> "starting" | "stopping" | "restarting" | "restarting <container>" | "error: ..."
@@ -548,7 +689,7 @@ def snapshot():
             "can_update": "compose" in spec, "updates": [c["name"] for c in containers if c["update"]],
             "containers": containers,
         })
-    return {"host": host, "apps": rows, "unlisted": sorted(set(every) - claimed)}
+    return {"host": host, "apps": rows, "programs": programs_state(), "unlisted": sorted(set(every) - claimed)}
 
 
 ICON = HERE / "icon.png"
@@ -645,6 +786,15 @@ class Panel(BaseHTTPRequestHandler):
                     names = [n for n in names if "compose" in APPS[n]]
                 started = [run_in_background(n, VERB[act], lambda n=n: turn(n, act)) for n in names]
                 return self.reply(202 if any(started) else 409, "{}")
+        # api/programs/<id>/<open|close|later>
+        if len(parts) == 4 and parts[:2] == ["api", "programs"] and parts[2] in PROGRAMS and parts[3] in ("open", "close", "later"):
+            try:
+                {"open": open_program, "close": close_program, "later": push_back}[parts[3]](parts[2])
+            except RuntimeError as e:
+                return self.reply(409, json.dumps({"error": str(e)}))
+            except Exception as e:
+                return self.reply(500, json.dumps({"error": str(e)}))
+            return self.reply(202, "{}")
         # api/containers/<name>/restart
         if len(parts) == 4 and parts[:2] == ["api", "containers"] and parts[3] == "restart":
             app = owner(parts[2], inspect_all())
@@ -659,6 +809,7 @@ def main():
     if cmd == "panel":
         threading.Thread(target=stats_loop, daemon=True).start()
         threading.Thread(target=updates_loop, daemon=True).start()
+        threading.Thread(target=timers_loop, daemon=True).start()
         print(f"panel on http://127.0.0.1:{PORT}", flush=True)
         ThreadingHTTPServer(("127.0.0.1", PORT), Panel).serve_forever()
     elif cmd == "status":
@@ -695,6 +846,25 @@ def main():
                     print(f"warning: {', '.join(clash)} is also on the GPU; both may not fit on the card", file=sys.stderr)
             print(f"{cmd} {app} ...", flush=True)
             turn(app, cmd)
+    elif cmd in ("open", "close", "later") and len(sys.argv) == 3:
+        name = sys.argv[2].lower()
+        if name not in PROGRAMS:
+            sys.exit(f"unknown program {name!r}; programs: {', '.join(PROGRAMS)}")
+        label = PROGRAMS[name].get("label", name)
+        if cmd == "open":
+            print(f"opening {label}" if open_program(name) else f"{label} is already open")
+        elif cmd == "close":
+            close_program(name); print(f"closing {label}")
+        else:
+            try:
+                push_back(name)
+            except RuntimeError as e:
+                sys.exit(str(e))
+            print(f"{label} now closes at {datetime.fromtimestamp(timers()[name]['at']):%H:%M}")
+    elif cmd == "programs":
+        for p in programs_state():
+            left = f"  closes in {p['closes_in'] // 60} min" if p["closes_in"] is not None else ""
+            print(f"{p['id']:12} {'open  ' if p['running'] else 'closed'}  {p['label']}{left}")
     elif cmd == "password":
         lock.main([str(LOCK.path)])
         print("The panel picks it up straight away; no restart needed.")

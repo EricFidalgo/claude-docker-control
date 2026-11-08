@@ -24,6 +24,30 @@ panel:
     - {label: System, path: /}
   # backup_status: /path/to/backups/status.json   # optional: shows the last backup on the panel
 
+# Desktop programs (not Docker) the panel can open on this PC's screen, e.g. Chrome so Claude can
+# browse while you're away. `launch` is the .desktop file's name without .desktop (see
+# /usr/share/applications, ~/.local/share/applications). `process` is a `pgrep -f` pattern that
+# finds it running; its oldest match gets a polite quit on Close. The PC must be logged in.
+# Optional `close_after_hours`: close it that long after the panel or `dock open` opened it
+# (`dock later <program>` or the panel's +1 hour pushes it back). One you opened at the PC is left alone.
+programs:
+  chrome:
+    label: Google Chrome
+    note: For Claude in Chrome research
+    launch: google-chrome
+    process: /opt/google/chrome/chrome
+    close_after_hours: 2   # Chrome holds 1-3 GB; this frees it if it's forgotten
+  localsend:
+    label: LocalSend
+    note: Send files between phone and PC
+    launch: localsend_app
+    process: localsend_app
+  claude:
+    label: Claude
+    note: Desktop app
+    launch: com.anthropic.Claude
+    process: /usr/lib/claude-desktop/
+
 apps:
   movies:
     label: Movies
