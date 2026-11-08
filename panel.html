@@ -88,6 +88,22 @@
              transform:scaleX(var(--p, 0)); transition:transform .6s var(--ease); }
   .meter i.warn { background:var(--warn); } .meter i.bad { background:var(--bad); }
   .tile.wide .v { font-size:22px; }
+  button.tile { border:0; text-align:left; font:inherit; color:inherit; width:100%; }
+  button.tile .k { display:flex; align-items:center; justify-content:space-between; gap:4px; }
+  button.tile .k .chev { width:6px; height:6px; margin:0 2px 0 0; }
+  button.tile[aria-expanded="true"] .k .chev { transform:rotate(135deg); }
+
+  .mem { margin-top:10px; padding:14px 16px 6px; }
+  .mem h3 { display:flex; justify-content:space-between; margin:0 0 4px; font-size:15px; font-weight:600; }
+  .mem h3 span { color:var(--muted); font-weight:500; }
+  .mem h4 { margin:12px 0 2px; color:var(--muted); font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+  .mrow { display:grid; grid-template-columns:1fr auto; column-gap:12px; padding:8px 0; font-size:15px; }
+  .mrow + .mrow { border-top:1px solid var(--line); }
+  .mrow .l { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .mrow .b { color:var(--muted); }
+  .mrow .meter { grid-column:1 / -1; margin-top:6px; height:3px; }
+  .mrow .meter i { background:var(--muted); }
+  .mrow.rest .meter i { background:var(--faint); }
 
   .hostsum { display:flex; align-items:center; gap:10px; width:100%; margin-top:10px; border:0; background:var(--surface);
              border-radius:var(--r); box-shadow:var(--shadow); padding:13px 16px; text-align:left; font-size:15px; color:var(--muted); }
@@ -113,8 +129,11 @@
   .expand { flex:1; min-width:0; display:flex; align-items:center; gap:12px; border:0; background:none; padding:0; text-align:left; }
   .info { flex:1; min-width:0; }
   .name { font-weight:600; font-size:17px; letter-spacing:-.01em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .name .chev { display:inline-block; margin-left:8px; vertical-align:2px; width:7px; height:7px; }
-  .app.open .name .chev { transform:rotate(135deg); vertical-align:4px; }
+  /* The chevron sits beside the label, not inside the part an ellipsis cuts off. */
+  .app .name { display:flex; align-items:center; }
+  .app .name .n { min-width:0; overflow:hidden; text-overflow:ellipsis; }
+  .name .chev { margin-left:8px; width:7px; height:7px; }
+  .app.open .name .chev { transform:rotate(135deg); margin-top:-3px; }
   .sub { color:var(--muted); font-size:14px; margin-top:1px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .sub.err { color:var(--bad-text); white-space:normal; }
   .sub .ok { color:var(--on-text); font-weight:500; }
@@ -238,6 +257,7 @@
       <div class="sk sk-tile" style="grid-column:span 2"></div><div class="sk sk-tile" style="grid-column:span 2"></div>
       <div class="sk sk-tile" style="grid-column:span 2"></div>
     </div>
+    <div id="mem"></div>
     <div id="hostsum"></div>
   </section>
 
@@ -287,6 +307,7 @@ const store = {
 const opened = new Set(JSON.parse(store.get("dock.open") || "[]"));
 let state = null;
 let hostMore = !!store.get("dock.hostmore");
+let memMore = !!store.get("dock.memmore");
 const pending = new Set();  // programs just asked to open or close
 
 // ---- formatting
@@ -297,7 +318,7 @@ function gbParts(b) {
   return g >= 1000 ? [one.format(g / 1024), "TB"] : [g >= 100 ? whole.format(g) : one.format(g), "GB"];
 }
 const gb = (b) => gbParts(b).join(" ");
-const size = (b) => b < 1024 ** 3 ? `${whole.format(b / 1024 ** 2)} MB` : gb(b);
+const size = (b) => b < 1000 * 1024 ** 2 ? `${whole.format(b / 1024 ** 2)} MB` : gb(b);
 // A length of time in seconds, said the short way: "3d 4h", "2h 5m", "12m".
 function dur(s) {
   s = Math.max(0, s);
@@ -395,12 +416,16 @@ async function program(p, action) {
 }
 
 // ---- this computer
-function tile(k, v, unit, detail, pct, span) {
-  const t = el("div", "tile");
+// A tile with onTap is a button that opens more detail; label and expanded describe it to screen readers.
+function tile(k, v, unit, detail, pct, { span, onTap, label, expanded } = {}) {
+  const t = el(onTap ? "button" : "div", "tile" + (onTap ? " press" : ""));
   t.style.setProperty("--span", span);
+  if (onTap) { t.setAttribute("aria-expanded", expanded); t.setAttribute("aria-label", label); }
   const val = el("div", "v num", v);
   if (unit) val.append(el("small", null, unit));
-  t.append(el("div", "k", k), val);
+  const key = el("div", "k", k);
+  if (onTap) { key.append(el("span", "chev")); t.onclick = onTap; }
+  t.append(key, val);
   if (detail) t.append(el("div", "d num", detail));
   if (pct != null) {
     const m = el("div", "meter"), i = el("i", pct > 90 ? "bad" : pct > 75 ? "warn" : "");
@@ -409,22 +434,27 @@ function tile(k, v, unit, detail, pct, span) {
   }
   return t;
 }
-function renderHost(h) {
+function renderHost(h, apps) {
   $("hostname").textContent = h.name;
   // Live readings on the first row, storage on the second, so each row reads as one idea.
   const live = [
     tile("CPU", h.cpu == null ? "…" : whole.format(h.cpu), h.cpu == null ? "" : "%", `${h.cores} cores`, h.cpu ?? 0),
-    tile("Memory", whole.format(100 * h.mem.used / h.mem.total), "%", `${gb(h.mem.used)} of ${gb(h.mem.total)}`, 100 * h.mem.used / h.mem.total),
+    tile("Memory", whole.format(100 * h.mem.used / h.mem.total), "%", ofTotal(h.mem.used, h.mem.total), 100 * h.mem.used / h.mem.total, {
+      onTap: () => { memMore = !memMore; store.set("dock.memmore", memMore ? "1" : ""); render(); },
+      expanded: memMore,
+      label: `Memory ${whole.format(100 * h.mem.used / h.mem.total)}% used. Show what’s using it`,
+    }),
   ];
-  if (h.gpu) live.push(tile("GPU", whole.format(100 * h.gpu.used / h.gpu.total), "%", `${gb(h.gpu.used)} of ${gb(h.gpu.total)}`, 100 * h.gpu.used / h.gpu.total));
+  if (h.gpu) live.push(tile("GPU", whole.format(100 * h.gpu.used / h.gpu.total), "%", ofTotal(h.gpu.used, h.gpu.total), 100 * h.gpu.used / h.gpu.total));
   live.forEach((t) => t.style.setProperty("--span", 6 / live.length));
   const disks = h.disks.map((d) => {
     const [free, unit] = gbParts(d.total - d.used);
-    const t = tile(d.label, free, ` ${unit} free`, `of ${gb(d.total)}`, 100 * d.used / d.total, 6 / Math.min(h.disks.length, 3));
+    const t = tile(d.label, free, ` ${unit} free`, `of ${gb(d.total)}`, 100 * d.used / d.total, { span: 6 / Math.min(h.disks.length, 3) });
     t.classList.add("wide");
     return t;
   });
   $("tiles").replaceChildren(...live, ...disks);
+  $("mem").replaceChildren(...(memMore ? [memoryCard(h.mem, apps)] : []));
 
   const up = dur(h.uptime);
   const lines = [];
@@ -453,6 +483,37 @@ function renderHost(h) {
   wrap.id = "hostmore"; wrap.append(box);
   $("hostsum").replaceChildren(sum, ...(hostMore ? [wrap] : []));
 }
+// "5.4 of 15.6 GB": the unit once, so it fits a third of a phone screen.
+function ofTotal(used, total) {
+  const [u, uu] = gbParts(used), [t, tu] = gbParts(total);
+  return uu === tu ? `${u} of ${t} ${tu}` : `${u} ${uu} of ${t} ${tu}`;
+}
+
+// Where the used RAM goes: Docker apps (from docker stats), big programs outside Docker, and the rest
+// (the desktop, the kernel and many small processes), so the rows add up to the tile's number.
+function memoryCard(mem, apps) {
+  const card = el("div", "card mem");
+  const head = el("h3", null, "What’s using memory"); head.append(el("span", "num", gb(mem.used)));
+  card.append(head);
+  // Shares are of all RAM, like the Memory tile, so they add up to its percent.
+  const pctOf = (bytes) => { const p = 100 * bytes / mem.total; return p < 1 ? "<1%" : `${whole.format(p)}%`; };
+  const row = (label, bytes, cls = "") => {
+    const r = el("div", "mrow " + cls), m = el("div", "meter"), i = el("i");
+    i.style.setProperty("--p", Math.min(1, bytes / mem.total));
+    m.append(i);
+    r.append(el("span", "l", label), el("span", "b num", `${size(bytes)} · ${pctOf(bytes)}`), m);
+    return r;
+  };
+  const dockerApps = apps.map((a) => ({ label: a.label, bytes: a.containers.reduce((n, c) => n + (c.mem_bytes || 0), 0) }))
+    .filter((a) => a.bytes > 0).sort((a, b) => b.bytes - a.bytes);
+  const programs = mem.programs || [];
+  if (dockerApps.length) card.append(el("h4", null, "Docker apps"), ...dockerApps.map((a) => row(a.label, a.bytes)));
+  if (programs.length) card.append(el("h4", null, "Outside Docker"), ...programs.map((p) => row(p.label, p.bytes)));
+  const rest = mem.used - [...dockerApps, ...programs].reduce((n, x) => n + x.bytes, 0);
+  if (rest > 0) card.append(el("h4", null, "Everything else"), row("System and small programs", rest, "rest"));
+  return card;
+}
+
 function gpuLine(g) {
   if (!g || !g.users.length) return "nothing loaded";
   return g.users.map((u) => `${u.label} ${size(u.mem)}`).join(", ");
@@ -540,7 +601,7 @@ function renderApps(apps) {
     const err = a.busy && a.busy.startsWith("error");
     const ex = el("button", "expand");
     ex.setAttribute("aria-expanded", isOpen);
-    const name = el("div", "name", a.label); name.append(el("span", "chev"));
+    const name = el("div", "name"); name.append(el("span", "n", a.label), el("span", "chev"));
     const info = el("div", "info"); info.append(name, subline(a));
     ex.append(iconFor(a.label, err ? "bad" : a.state === "partial" ? "warn" : a.state === "on" ? "on" : ""), info);
     ex.onclick = () => { isOpen ? opened.delete(a.id) : opened.add(a.id); store.set("dock.open", JSON.stringify([...opened])); render(); };
@@ -610,7 +671,7 @@ function renderPrograms(progs) {
 
 function render() {
   if (!state) return;
-  renderHost(state.host);
+  renderHost(state.host, state.apps);
   renderApps(state.apps);
   renderPrograms(state.programs || []);
   const foot = [];

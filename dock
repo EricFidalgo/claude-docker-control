@@ -330,13 +330,13 @@ def gpu_stats(every):
             "util": _num(util), "temp": _num(temp), "users": sorted(users.values(), key=lambda u: -u["mem"])}
 
 
-UNITS = {"B": 1, "kB": 1e3, "KB": 1e3, "MB": 1e6, "GB": 1e9, "TB": 1e12}
+UNITS = {"B": 1, "KB": 1e3, "MB": 1e6, "GB": 1e9, "TB": 1e12, "KIB": 1024, "MIB": 1024 ** 2, "GIB": 1024 ** 3, "TIB": 1024 ** 4}
 
 
 def _bytes(s):
-    """Docker's '24.6GB' / '476.8kB' / '0B' as bytes."""
-    m = re.match(r"([\d.]+)\s*([kKMGT]?B)", s or "")
-    return int(float(m.group(1)) * UNITS[m.group(2)]) if m else 0
+    """Docker's '24.6GB' / '476.8kB' / '31.26MiB' / '0B' as bytes; 0 if it can't be read."""
+    m = re.match(r"([\d.]+)\s*([kKMGT]?i?B)", s or "")
+    return int(float(m.group(1)) * UNITS[m.group(2).upper()]) if m else 0
 
 
 _df = {"at": 0.0, "val": None}
@@ -466,6 +466,62 @@ def updates_loop():
         time.sleep(12 * 3600)
 
 
+_mem = {"at": 0.0, "val": []}
+
+
+FRIENDLY = [(r"/claude/versions/", "Claude Code"), (r"/node$", "Node.js"), (r"^gnome-shell$|/gnome-shell$", "Desktop (GNOME)")]
+
+
+def program_name(pid, comm):
+    """A person-friendly name for a process outside Docker: its PROGRAMS label, a known name, its /opt folder, or its file."""
+    try:
+        exe = os.readlink(f"/proc/{pid}/exe")
+    except OSError:
+        exe = ""
+    for n, spec in PROGRAMS.items():
+        if spec.get("process") and (spec["process"] in exe or spec["process"] == comm):
+            return spec.get("label", n)
+    for pattern, label in FRIENDLY:
+        if re.search(pattern, exe or comm):
+            return label
+    folder = re.match(r"/opt/([^/]+)/", exe)
+    if folder and folder.group(1) != "google":
+        return folder.group(1)
+    # Threads rename themselves (Node's is "MainThread"), so the program file names it better.
+    return Path(exe).name if exe else comm
+
+
+def memory_by_program(limit=6):
+    """The biggest programs outside Docker by memory, so the panel can say where the rest of the RAM goes.
+    PSS (proportional set size) splits memory shared between processes, so Chrome's dozens of
+    processes add up to what Chrome really holds instead of several times that."""
+    if time.time() - _mem["at"] < 10:
+        return _mem["val"]
+    totals = {}
+    for d in Path("/proc").iterdir():
+        if not d.name.isdigit():
+            continue
+        try:
+            if re.search(r"docker|containerd|libpod", (d / "cgroup").read_text()):
+                continue  # counted per app from docker stats
+            comm = (d / "comm").read_text().strip()
+            try:
+                kb = next(int(l.split()[1]) for l in (d / "smaps_rollup").read_text().splitlines() if l.startswith("Pss:"))
+            except (OSError, StopIteration):  # other users' processes: resident size is the best we can read
+                kb = int((d / "statm").read_text().split()[1]) * os.sysconf("SC_PAGE_SIZE") // 1024
+        except (OSError, ValueError, IndexError):
+            continue  # exited meanwhile, or a kernel thread
+        if kb:
+            name = program_name(d.name, comm)
+            # A sandboxed helper's file can't be read, so it shows as e.g. "open-whispr-app"; fold it into "OpenWhispr".
+            same_program = re.sub(r"app$", "", re.sub(r"[^a-z]", "", name.lower()))
+            label, total = totals.get(same_program, (name, 0))
+            totals[same_program] = (label if label[:1].isupper() else name, total + kb * 1024)
+    biggest = sorted(({"label": label, "bytes": n} for label, n in totals.values() if n >= 50 * MIB), key=lambda x: -x["bytes"])[:limit]
+    _mem.update(at=time.time(), val=biggest)
+    return biggest
+
+
 def host_stats(every):
     mem = {l.split(":")[0]: int(l.split()[1]) * 1024 for l in Path("/proc/meminfo").read_text().splitlines()}
     disks = []
@@ -481,7 +537,7 @@ def host_stats(every):
         "load": os.getloadavg(),
         "cores": os.cpu_count(),
         "cpu": cpu_percent(),
-        "mem": {"used": mem["MemTotal"] - mem["MemAvailable"], "total": mem["MemTotal"]},
+        "mem": {"used": mem["MemTotal"] - mem["MemAvailable"], "total": mem["MemTotal"], "programs": memory_by_program()},
         "disks": disks,
         "tailscale": tailscale()["host"],
         "backup": backup_stats(),
@@ -504,7 +560,8 @@ def stats_loop():
             fresh = {}
             for line in r.stdout.splitlines():
                 name, cpu, mem = line.split("\t")
-                fresh[name] = {"cpu": cpu, "mem": mem.split(" / ")[0]}
+                used = mem.split(" / ")[0]
+                fresh[name] = {"cpu": cpu, "mem": used, "mem_bytes": _bytes(used)}
             stats.clear(); stats.update(fresh)
         time.sleep(4)
 
