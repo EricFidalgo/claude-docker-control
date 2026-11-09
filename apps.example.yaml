@@ -27,9 +27,13 @@ panel:
 # Desktop programs (not Docker) the panel can open on this PC's screen, e.g. Chrome so Claude can
 # browse while you're away. `launch` is the .desktop file's name without .desktop (see
 # /usr/share/applications, ~/.local/share/applications). `process` is a `pgrep -f` pattern that
-# finds it running; its oldest match gets a polite quit on Close. The PC must be logged in.
+# finds it running (or `exe`, the start of its program file's path, for programs that rewrite their
+# command line); its oldest match gets a polite quit on Close, and whatever of it is still up 15
+# seconds later is made to quit. The PC must be logged in.
 # Optional `close_after_hours`: close it that long after the panel or `dock open` opened it
 # (`dock later <program>` or the panel's +1 hour pushes it back). One you opened at the PC is left alone.
+# Optional `close_when_idle_minutes`: close it, however it was opened, once nobody has touched the PC's
+# keyboard or mouse for that long (counted from when it opened, if that's later). Needs GNOME.
 programs:
   chrome:
     label: Google Chrome
@@ -42,6 +46,7 @@ programs:
     note: Send files between phone and PC
     launch: localsend_app
     process: localsend_app
+    close_when_idle_minutes: 30
   claude:
     label: Claude
     note: Desktop app

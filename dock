@@ -12,6 +12,7 @@
   dock open    <program>      open a desktop program from `programs:` (Chrome, LocalSend, ...) on this PC's screen
   dock close   <program>      ask that program to quit
   dock later   <program>      push its auto-close back an hour (programs with `close_after_hours`)
+                              (programs with `close_when_idle_minutes` close once the PC's keyboard and mouse sit untouched that long)
   dock programs               list the desktop programs and whether each is open
   dock panel                  serve the phone panel on 127.0.0.1:<panel.port>
   dock password               set the ONE phone password shared by the panel, Money and VoiceStudio, 6+ numbers (also the way back in; turns Face ID off)
@@ -44,6 +45,7 @@ sys.path.insert(0, str(HERE))
 import lock  # noqa: E402
 
 # DOCK_PORT and DOCK_LOCK let a test copy of the panel run beside the real one.
+# rp_name stays "Docker": it is only the label in the passkey prompt, and renaming it gains nothing.
 LOCK = lock.Lock(Path(os.environ.get("DOCK_LOCK") or Path.home() / ".local/share/app-lock/lock.json"), cookie="dock_lock", rp_name="Docker")
 
 # apps.yaml is this machine's own list and stays out of git; apps.example.yaml shows the format.
@@ -587,18 +589,71 @@ def desktop_env():
 WRAPPERS = {"bash", "sh", "dash", "zsh", "fish", "python3", "timeout", "sudo"}
 
 
+def _started_ticks(pid):
+    """When a process started, in clock ticks since boot."""
+    return int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19])
+
+
 def program_pids(spec):
-    """PIDs matching `process`, oldest first. Skips shells and wrappers, whose command line can quote the pattern."""
+    """PIDs matching `process` (a pattern on the command line) or `exe` (the start of the program file's
+    path, for apps whose main process rewrites its command line), oldest first. Skips shells and
+    wrappers, whose command line can quote the pattern."""
+    if spec.get("exe"):
+        found = []
+        for d in Path("/proc").iterdir():
+            with contextlib.suppress(OSError):
+                if d.name.isdigit() and os.readlink(d / "exe").startswith(spec["exe"]):
+                    found.append(d.name)
+    else:
+        found = sh(["pgrep", "-f", spec["process"]], check=False).stdout.split()
     pids = []
-    for pid in sh(["pgrep", "-f", spec["process"]], check=False).stdout.split():
+    for pid in found:
         try:
             if Path(f"/proc/{pid}/comm").read_text().strip() in WRAPPERS:
                 continue
-            started = int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19])
+            started = _started_ticks(pid)
         except (OSError, ValueError, IndexError):
             continue  # exited meanwhile
         pids.append((started, int(pid)))
     return [pid for _, pid in sorted(pids)]
+
+
+def program_age(spec):
+    """Seconds since the program's main process started; None when it isn't running."""
+    pids = program_pids(spec)
+    if not pids:
+        return None
+    try:
+        boot = next(int(l.split()[1]) for l in Path("/proc/stat").read_text().splitlines() if l.startswith("btime "))
+        return time.time() - (boot + _started_ticks(pids[0]) / os.sysconf("SC_CLK_TCK"))
+    except (OSError, ValueError, IndexError, StopIteration):
+        return None
+
+
+def idle_seconds():
+    """How long the PC's keyboard and mouse have sat untouched, from GNOME. None when it can't tell
+    (logged out, or not GNOME), and then nothing closes for being idle."""
+    try:
+        r = subprocess.run(["gdbus", "call", "--session", "--dest", "org.gnome.Mutter.IdleMonitor",
+                            "--object-path", "/org/gnome/Mutter/IdleMonitor/Core",
+                            "--method", "org.gnome.Mutter.IdleMonitor.GetIdletime"],
+                           env=desktop_env(), capture_output=True, text=True, timeout=5)
+        return int(r.stdout.split()[1].rstrip(",)")) / 1000 if r.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError):
+        return None
+
+
+def idle_left(spec, idle):
+    """Seconds until a `close_when_idle_minutes` program closes for idleness, or None if it has no such limit.
+    The clock starts at the later of the last key or mouse touch and the program's own start, so one
+    opened from the phone while nobody is at the PC still gets the full time."""
+    limit = spec.get("close_when_idle_minutes")
+    if not limit or idle is None:
+        return None
+    age = program_age(spec)
+    if age is None:
+        return None
+    return max(0, int(float(limit) * 60 - min(idle, age)))
 
 
 def program_running(spec):
@@ -655,6 +710,11 @@ def timers_loop():
                         del t[name]  # closed by hand, so the timer is moot
                 elif time.time() >= entry["at"]:
                     due.append(name)
+        idle = idle_seconds()
+        for name, spec in PROGRAMS.items():
+            if name not in due and idle_left(spec, idle) == 0:
+                print(f"{name}: PC idle {int(idle // 60)} min", end="; ", flush=True)
+                due.append(name)
         for name in due:
             print(f"auto-closing {name}", flush=True)
             close_program(name)
@@ -681,21 +741,84 @@ def open_program(name):
 
 def close_program(name):
     # The oldest matching process is the main one; a polite TERM lets it save tabs and quit cleanly.
-    pids = program_pids(PROGRAMS[name])
+    spec = PROGRAMS[name]
+    pids = program_pids(spec)
+    worker = None
     if pids:
+        # Taken now: once the main one exits, its helpers lose their parent. Every other match is
+        # added too, in case a helper was started some other way (D-Bus, a re-parented child).
+        family = process_family(pids[0])
+        family.update({p: t for p in pids[1:] if (t := _started_ticks_or_none(p)) is not None})
         os.kill(pids[0], signal.SIGTERM)
+        worker = threading.Thread(target=make_sure_closed, args=(spec.get("label", name), family), daemon=True)
+        worker.start()
     with edit_timers() as t:
         t.pop(name, None)
+    return worker
+
+
+def _started_ticks_or_none(pid):
+    try:
+        return _started_ticks(pid)
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def process_family(root):
+    """{pid: start ticks} for a process and everything under it. The start ticks tell a later
+    check whether a PID still means the same process rather than a new one that reused the number."""
+    kids = {}
+    for d in Path("/proc").iterdir():
+        if d.name.isdigit():
+            with contextlib.suppress(OSError, ValueError, IndexError):
+                ppid = int(d.joinpath("stat").read_text().rsplit(")", 1)[1].split()[1])
+                kids.setdefault(ppid, []).append(int(d.name))
+    family, todo = {}, [root]
+    while todo:
+        pid = todo.pop()
+        with contextlib.suppress(OSError, ValueError, IndexError):
+            family[pid] = _started_ticks(pid)
+            todo += kids.get(pid, [])
+    return family
+
+
+QUIT_WAIT = 15  # seconds a program gets to quit politely before it's made to
+
+
+def make_sure_closed(label, family):
+    """Some apps ignore the polite quit (OpenWhispr hides to the tray), or quit and leave helpers behind
+    (OpenWhispr's speech model, 1.3 GB). Whatever of the family is still up after QUIT_WAIT gets TERM,
+    then KILL."""
+    def alive():
+        out = []
+        for pid, ticks in family.items():
+            with contextlib.suppress(OSError, ValueError, IndexError):
+                if _started_ticks(pid) == ticks and Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z":
+                    out.append(pid)
+        return out
+    time.sleep(QUIT_WAIT)
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        left = alive()
+        if not left:
+            return
+        print(f"{label}: {len(left)} process(es) still up after quit; sending {sig.name}", flush=True)
+        for pid in left:
+            with contextlib.suppress(OSError):
+                os.kill(pid, sig)
+        time.sleep(5)
 
 
 def programs_state():
     out = []
+    idle = idle_seconds()
     for n, s in PROGRAMS.items():
         running = program_running(s)
         entry = timers().get(n) if running else None
         at = entry.get("at") if isinstance(entry, dict) else None
         out.append({"id": n, "label": s.get("label", n), "note": s.get("note", ""), "running": running,
-                    "closes_in": max(0, int(at - time.time())) if at else None})
+                    "closes_in": max(0, int(at - time.time())) if at else None,
+                    "idle_minutes": s.get("close_when_idle_minutes"),
+                    "idle_left": idle_left(s, idle) if running else None})
     return out
 
 
@@ -750,7 +873,7 @@ def snapshot():
 
 
 ICON = HERE / "icon.png"
-MANIFEST = json.dumps({"name": "Docker", "short_name": "Docker", "start_url": "/", "display": "standalone",
+MANIFEST = json.dumps({"name": "Linux Remote", "short_name": "Linux Remote", "start_url": "/", "display": "standalone",
                        "background_color": "#000000", "theme_color": "#000000",
                        "icons": [{"src": "/icon.png", "sizes": "180x180", "type": "image/png"}]})
 
@@ -911,7 +1034,9 @@ def main():
         if cmd == "open":
             print(f"opening {label}" if open_program(name) else f"{label} is already open")
         elif cmd == "close":
-            close_program(name); print(f"closing {label}")
+            print(f"closing {label}", flush=True)
+            if worker := close_program(name):
+                worker.join()  # stay until it's really gone, or the follow-up check dies with this command
         else:
             try:
                 push_back(name)
@@ -921,6 +1046,8 @@ def main():
     elif cmd == "programs":
         for p in programs_state():
             left = f"  closes in {p['closes_in'] // 60} min" if p["closes_in"] is not None else ""
+            if p["idle_left"] is not None:
+                left += f"  closes in {p['idle_left'] // 60} min unless the PC is used"
             print(f"{p['id']:12} {'open  ' if p['running'] else 'closed'}  {p['label']}{left}")
     elif cmd == "password":
         lock.main([str(LOCK.path)])
