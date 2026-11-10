@@ -127,6 +127,16 @@
   .icon.on { background:var(--on); color:#fff; }
   .icon.warn { background:var(--warn); color:#fff; }
   .icon.bad { background:var(--bad); color:#fff; }
+  /* A real icon: the picture shows what it is, a dot in the corner shows its state (none = off). */
+  .icon.pic { position:relative; background:var(--fill); }
+  .icon.pic img { width:100%; height:100%; border-radius:inherit; object-fit:cover; transition:opacity .3s, filter .3s; }
+  .icon.pic:not(.on):not(.warn):not(.bad) img { opacity:.55; filter:grayscale(.6); }
+  .icon.pic::after { content:""; position:absolute; right:-3px; bottom:-3px; width:12px; height:12px; border-radius:50%;
+                     border:2px solid var(--surface); background:transparent; transition:background-color .3s; }
+  .icon.pic:not(.on):not(.warn):not(.bad)::after { display:none; }
+  .icon.pic.on::after { background:var(--on); }
+  .icon.pic.warn::after { background:var(--warn); }
+  .icon.pic.bad::after { background:var(--bad); }
   .info { flex:1; min-width:0; }
   .name { font-weight:600; font-size:17px; letter-spacing:-.01em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .sub { color:var(--muted); font-size:15px; margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -404,11 +414,20 @@ async function act(app, action) {
                  `${app.label} uses it too, and both may not fit.`, "Start Anyway")) return;
   if (action === "update" && !await ask(`Update ${app.label}?`, `Downloads the newer image for ${app.updates.join(", ")} ` +
                                         `and recreates its containers. Data and settings are kept.`, "Update")) return;
+  markBusy([app.id], VERB[action]);
   try {
     const r = await post(`/api/apps/${app.id}/${action}`);
     if (r.status === 409) toast(`${app.label} is still busy. Try again in a few seconds.`);
   } catch { toast("Can’t reach the PC right now."); }
   refresh();
+}
+
+// Show the switch working the moment it's tapped, not a poll later; the PC's answer then takes over.
+const VERB = { on: "starting", off: "stopping", restart: "restarting", update: "updating" };
+function markBusy(ids, label) {
+  for (const a of state?.apps || []) if (ids.includes(a.id) && !working(a)) a.busy = label;
+  seq++;  // a poll already on its way left before the tap; don't let it flip the switch back
+  render(); status();
 }
 
 async function restartContainer(name) {
@@ -538,13 +557,30 @@ function backupLine(b) {
 }
 
 // ---- apps
-function iconFor(label, cls) { return el("span", "icon " + (cls || ""), (label.trim()[0] || "?").toUpperCase()); }
+// The app's own picture when the PC has one, otherwise its first letter (also if the picture fails to load).
+// Each picture is loaded once and the same one moved into every redraw, so icons don't blink every poll.
+const pics = new Map(), badPics = new Set();
+function iconFor(label, cls, src) {
+  const letter = el("span", "icon " + (cls || ""), (label.trim()[0] || "?").toUpperCase());
+  if (!src || badPics.has(src)) return letter;
+  const box = el("span", "icon pic " + (cls || ""));
+  let img = pics.get(src);
+  if (!img) {
+    img = new Image(); img.alt = ""; img.src = src;
+    img.onerror = () => { badPics.add(src); pics.delete(src); img.closest(".icon")?.replaceWith(letter); };
+    pics.set(src, img);
+  }
+  box.append(img);
+  return box;
+}
 
 // One short status, never the app's description: that lives in its details.
 function subline(a) {
   const sub = el("div", "sub");
-  if (a.busy && a.busy.startsWith("error")) { sub.className += " err"; sub.textContent = a.busy; return sub; }
+  if (a.busy && a.busy.startsWith("error")) { sub.className += " err"; sub.textContent = "Didn’t work: " + a.busy.replace(/^error:\s*/, ""); return sub; }
   if (working(a)) { sub.append(el("span", "act-t", cap(a.busy) + "…")); return sub; }
+  // Docker retrying a container that dies at once: say so, rather than a plain "Off" that invites another tap.
+  if (a.containers.some((c) => c.state === "restarting")) { sub.className += " err"; sub.textContent = "Keeps crashing · open for logs"; return sub; }
   if (a.state === "partial") sub.append(el("span", "warn-t", `${a.running} of ${a.total} running`));
   else if (a.state === "on") sub.append(el("span", "ok-t", "Running"));
   else if (a.state === "missing") sub.append("Not set up yet");
@@ -612,7 +648,7 @@ function renderApps(apps) {
     ex.setAttribute("aria-expanded", isOpen);
     ex.setAttribute("aria-controls", `d-${a.id}`);
     const info = el("div", "info"); info.append(el("div", "name", a.label), subline(a));
-    ex.append(iconFor(a.label, err ? "bad" : a.state === "partial" ? "warn" : a.state === "on" ? "on" : ""), info);
+    ex.append(iconFor(a.label, err ? "bad" : a.state === "partial" ? "warn" : a.state === "on" ? "on" : "", a.icon), info);
     ex.onclick = () => { isOpen ? opened.delete(a.id) : opened.add(a.id); store.set("dock.open", JSON.stringify([...opened])); render(); };
     const sw = el("button", "sw" + (lit(a) ? " " + a.state : "") + (working(a) ? " busy" : ""));
     sw.setAttribute("role", "switch");
@@ -687,7 +723,7 @@ function renderPrograms(progs) {
     b.setAttribute("aria-label", `${p.running ? "Close" : "Open"} ${p.label}`);
     b.onclick = () => program(p, p.running ? "close" : "open");
     btns.append(b);
-    row.append(iconFor(p.label, p.running ? "on" : ""), info, btns);
+    row.append(iconFor(p.label, p.running ? "on" : "", p.icon), info, btns);
     item.append(row);
     return item;
   }));
@@ -705,19 +741,40 @@ function render() {
   $("foot").textContent = foot.join(" · ");
 }
 
+// Only the newest answer is drawn, so a slow one can't land after a fresher one and undo it.
+let seq = 0, asking = 0;  // asking: when the newest request left, 0 once it's answered
 async function refresh() {
+  const n = ++seq;
+  asking = Date.now();
   try {
     const r = await fetch("/api/state", { cache: "no-store" });
     if (!r.ok) throw new Error(r.status);
-    state = await r.json();
-    render();
+    const s = await r.json();
+    if (n !== seq) return;
+    state = s;
+    draw();
     $("offline").classList.remove("show");
     status();
   } catch {
+    if (n !== seq) return;
     $("offline").classList.add("show");
     $("status").textContent = state ? "Showing the last known state" : "Can’t connect";
+  } finally {
+    if (n === seq) asking = 0;
   }
 }
+
+// A redraw replaces every button. One landing between a finger going down and coming up swallows the
+// tap, so a poll that arrives mid-touch waits until just after the tap has gone through.
+// A finger held past 2 seconds isn't a tap, and a lost "lift" event mustn't freeze the screen, so then it redraws anyway.
+let touchedAt = 0, owed = false;
+const touching = () => touchedAt && Date.now() - touchedAt < 2000;
+function draw() { if (touching()) owed = true; else { owed = false; render(); } }
+document.addEventListener("pointerdown", () => { touchedAt = Date.now(); }, true);
+for (const ev of ["pointerup", "pointercancel"]) document.addEventListener(ev, () => {
+  touchedAt = 0;
+  if (owed) setTimeout(() => { if (owed && !touching()) { owed = false; render(); } }, 120);
+}, true);
 
 // The one line under the title, about the tab you're on.
 function status() {
@@ -730,10 +787,10 @@ function status() {
   else s.append(`${state.apps.filter(lit).length} of ${state.apps.length} Docker apps on`);
 }
 
-// ---- tabs: System (memory first), Docker, Apps. The last one you used opens next time.
+// ---- tabs: System (memory first), Docker, Apps.
 const TABS = ["system", "docker", "apps"];
-// A link ending in #docker or #apps opens that tab; otherwise the last one you used.
-const asked = location.hash.slice(1);  // always opens on System (memory) unless a link names a tab
+// The panel opens on System, unless its link ends in #docker or #apps.
+const asked = location.hash.slice(1);
 let tab = TABS.includes(asked) ? asked : "system";
 function setTab(t, focus = false) {
   tab = t;
@@ -782,11 +839,13 @@ $("loglines").onchange = () => { delete $("logtext").dataset.loaded; loadLogs();
 $("all-on").onclick = async () => {
   const gpuApps = (state?.apps || []).filter((a) => a.gpu).map((a) => a.label);
   if (gpuApps.length > 1 && !await ask("Start every app?", `${gpuApps.join(" and ")} share the GPU and may not fit together.`, "Start All")) return;
+  markBusy((state?.apps || []).map((a) => a.id), "starting");
   try { await post("/api/apps/all/on"); } catch { toast("Can’t reach the PC right now."); }
   refresh();
 };
 $("all-off").onclick = async () => {
   if (!await ask("Stop every app?", "Data and settings are kept.", "Stop All", true)) return;
+  markBusy((state?.apps || []).filter(lit).map((a) => a.id), "stopping");
   try { await post("/api/apps/all/off"); } catch { toast("Can’t reach the PC right now."); }
   refresh();
 };
@@ -796,7 +855,9 @@ new IntersectionObserver(([e]) => $("bar").classList.toggle("show", !e.isInterse
 
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 refresh();
-setInterval(() => { if (!document.hidden && !logName && !answer) refresh(); }, 3000);
+// Skip a beat while the last request is still out (slow signal, or waiting behind the lock screen),
+// so they don't pile up; one stuck past 15 seconds doesn't stop the polling.
+setInterval(() => { if (!document.hidden && !logName && !answer && Date.now() - asking > 15000) refresh(); }, 3000);
 setInterval(() => { if (!document.hidden && logName) loadLogs(); }, 5000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 </script>

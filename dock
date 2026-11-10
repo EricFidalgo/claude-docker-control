@@ -33,9 +33,9 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.error import HTTPError
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 from urllib.request import Request, urlopen
 
 import yaml
@@ -90,6 +90,7 @@ def inspect_all():
             "restarts": c.get("RestartCount", 0),
             "image": c["Config"]["Image"],
             "project": (c["Config"].get("Labels") or {}).get("com.docker.compose.project"),
+            "workdir": (c["Config"].get("Labels") or {}).get("com.docker.compose.project.working_dir"),
             # PortBindings survive a stop, unlike the live port list, so links work while an app is off.
             "binds": {int(b["HostPort"]): b["HostIp"] or "0.0.0.0"
                       for bs in (c["HostConfig"].get("PortBindings") or {}).values() for b in bs or [] if b.get("HostPort")},
@@ -126,6 +127,7 @@ def turn(app, action):
     spec = APPS[app]
     if action == "update":
         return update(app)
+    t0 = time.time()
     if "containers" in spec:
         sh(["docker", {"on": "start", "off": "stop", "restart": "restart"}[action], *spec["containers"]])
     else:
@@ -134,14 +136,38 @@ def turn(app, action):
             sh([*base, "stop"])
         elif action == "restart":
             sh([*base, "restart"])
-        elif members(app, inspect_all()):
+        elif (cs := members(app, inspect_all())) and not moved(cs, d):
             sh([*base, "start"])
         elif "up" in spec:
             sh(["bash", "-c", spec["up"]], cwd=d)
         else:
             sh([*base, "up", "-d"])
+    if action in ("on", "restart"):
+        check_started(app, t0)
     if action != "off" and "after_start" in spec:
         sh(["bash", "-c", os.path.expanduser(spec["after_start"])], cwd=app_dir(spec))
+
+
+def moved(cs, d):
+    """True when the app's containers were made from a folder that's since moved. `compose start` would
+    reuse them as they are, still pointing at the old folder, and they'd die straight away (VoiceStudio
+    did this after docker-master became linux-remote), so they're recreated from the new one instead."""
+    return any(c["workdir"] and os.path.realpath(c["workdir"]) != os.path.realpath(d) for c in cs)
+
+
+START_CHECK = 5  # seconds a just-started app gets before a stopped container counts as a crash
+
+
+def check_started(app, since):
+    """Raises if a container stopped with an error right after starting, or Docker keeps restarting it.
+    Otherwise a crashing app just goes back to looking "off" and the switch seems to do nothing."""
+    time.sleep(START_CHECK)
+    after = datetime.fromtimestamp(since, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")  # Docker's times are UTC
+    for c in members(app, inspect_all()):
+        if c["state"] == "restarting":
+            raise RuntimeError(f"{c['name']} keeps crashing and restarting; its logs should say why")
+        if c["state"] in ("exited", "dead") and c["exit"] and (c["finished"] or "") >= after:
+            raise RuntimeError(f"{c['name']} stopped right after starting (code {c['exit']}); its logs should say why")
 
 
 def update(app):
@@ -558,13 +584,17 @@ last_poll = [0.0]
 def stats_loop():
     while True:
         if time.time() - last_poll[0] < 20:
-            r = sh(["docker", "stats", "--no-stream", "--format", "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"], check=False)
-            fresh = {}
-            for line in r.stdout.splitlines():
-                name, cpu, mem = line.split("\t")
-                used = mem.split(" / ")[0]
-                fresh[name] = {"cpu": cpu, "mem": used, "mem_bytes": _bytes(used)}
-            stats.clear(); stats.update(fresh)
+            try:
+                r = sh(["docker", "stats", "--no-stream", "--format", "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"], check=False)
+                fresh = {}
+                for line in r.stdout.splitlines():
+                    with contextlib.suppress(ValueError):  # a container mid-start can print a short line
+                        name, cpu, mem = line.split("\t")
+                        used = mem.split(" / ")[0]
+                        fresh[name] = {"cpu": cpu, "mem": used, "mem_bytes": _bytes(used)}
+                stats.clear(); stats.update(fresh)
+            except Exception as e:  # keep the thread alive; the panel just shows older numbers
+                print(f"stats failed: {e}", flush=True)
         time.sleep(4)
 
 
@@ -699,26 +729,34 @@ def push_back(name, seconds=3600):
 
 def timers_loop():
     while True:
-        due = []
-        with edit_timers() as t:
-            for name, entry in list(t.items()):
-                spec = PROGRAMS.get(name)
-                if not spec or not isinstance(entry, dict):
-                    del t[name]
-                elif not program_running(spec):
-                    if time.time() - entry["set"] > STARTUP_GRACE:
-                        del t[name]  # closed by hand, so the timer is moot
-                elif time.time() >= entry["at"]:
-                    due.append(name)
-        idle = idle_seconds()
-        for name, spec in PROGRAMS.items():
-            if name not in due and idle_left(spec, idle) == 0:
-                print(f"{name}: PC idle {int(idle // 60)} min", end="; ", flush=True)
-                due.append(name)
-        for name in due:
-            print(f"auto-closing {name}", flush=True)
-            close_program(name)
+        try:
+            close_due()
+        except Exception as e:  # keep the thread alive, or nothing auto-closes until the panel restarts
+            print(f"auto-close check failed: {e}", flush=True)
         time.sleep(60)
+
+
+def close_due():
+    """Closes programs whose timer is up, or that sat unused past their idle limit."""
+    due = []
+    with edit_timers() as t:
+        for name, entry in list(t.items()):
+            spec = PROGRAMS.get(name)
+            if not spec or not isinstance(entry, dict):
+                del t[name]
+            elif not program_running(spec):
+                if time.time() - entry["set"] > STARTUP_GRACE:
+                    del t[name]  # closed by hand, so the timer is moot
+            elif time.time() >= entry["at"]:
+                due.append(name)
+    idle = idle_seconds()
+    for name, spec in PROGRAMS.items():
+        if name not in due and idle_left(spec, idle) == 0:
+            print(f"{name}: PC idle {int(idle // 60)} min", end="; ", flush=True)
+            due.append(name)
+    for name in due:
+        print(f"auto-closing {name}", flush=True)
+        close_program(name)
 
 
 def open_program(name):
@@ -749,7 +787,8 @@ def close_program(name):
         # added too, in case a helper was started some other way (D-Bus, a re-parented child).
         family = process_family(pids[0])
         family.update({p: t for p in pids[1:] if (t := _started_ticks_or_none(p)) is not None})
-        os.kill(pids[0], signal.SIGTERM)
+        with contextlib.suppress(ProcessLookupError):  # it quit on its own a moment ago
+            os.kill(pids[0], signal.SIGTERM)
         worker = threading.Thread(target=make_sure_closed, args=(spec.get("label", name), family), daemon=True)
         worker.start()
     with edit_timers() as t:
@@ -818,13 +857,138 @@ def programs_state():
         out.append({"id": n, "label": s.get("label", n), "note": s.get("note", ""), "running": running,
                     "closes_in": max(0, int(at - time.time())) if at else None,
                     "idle_minutes": s.get("close_when_idle_minutes"),
-                    "idle_left": idle_left(s, idle) if running else None})
+                    "idle_left": idle_left(s, idle) if running else None, "icon": icon_url("program", n)})
     return out
+
+
+# ---- icons ---------------------------------------------------------------------------------
+# Each app and program gets a real icon on the panel, cached in ICONS as "<kind>-<id>.<ext>".
+# Programs: their own .desktop file's icon, from the icon theme. Docker apps: `icon:` in apps.yaml
+# (a file path, a URL, or a name from the homelab dashboard-icons set, e.g. `jellyfin`), else the
+# icon its main web page declares, fetched once the app is up. Nothing found: the panel shows a letter.
+ICONS = Path.home() / ".cache/dock/icons"
+DASHBOARD_ICONS = "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons@main/png/{}.png"
+IMAGE_TYPES = {".png": "image/png", ".svg": "image/svg+xml", ".ico": "image/x-icon", ".jpg": "image/jpeg", ".webp": "image/webp"}
+ICON_DIRS = [Path.home() / ".local/share/icons/hicolor", Path("/usr/share/icons/hicolor")]
+
+
+def cached_icon(kind, name):
+    return next((p for p in ICONS.glob(f"{kind}-{name}.*") if p.suffix in IMAGE_TYPES), None)
+
+
+def save_icon(kind, name, data, ext):
+    if ext not in IMAGE_TYPES or not data:
+        return
+    ICONS.mkdir(parents=True, exist_ok=True)
+    for old in ICONS.glob(f"{kind}-{name}.*"):
+        old.unlink()
+    tmp = ICONS / f".{kind}-{name}{ext}"
+    tmp.write_bytes(data)
+    os.replace(tmp, ICONS / f"{kind}-{name}{ext}")
+
+
+def ext_of(content_type, url):
+    for ext, t in IMAGE_TYPES.items():
+        if content_type.startswith(t):
+            return ext
+    return ".jpg" if url.lower().endswith(".jpeg") else Path(urlparse(url).path).suffix.lower()
+
+
+def fetch(url, limit=2 * 1024 ** 2):
+    with urlopen(Request(url, headers={"User-Agent": "dock-icons"}), timeout=8) as r:
+        return r.read(limit), r.headers.get("Content-Type", "")
+
+
+def theme_icon(icon):
+    """The biggest file for an icon-theme name: a scalable SVG, else the largest PNG."""
+    if icon.startswith("/"):
+        return Path(icon) if Path(icon).exists() else None
+    best = None
+    for root in ICON_DIRS:
+        for f in root.glob(f"*/apps/{icon}.*"):
+            size = 10 ** 4 if f.parent.parent.name == "scalable" else int(f.parent.parent.name.split("x")[0] or 0)
+            if f.suffix in IMAGE_TYPES and (not best or size > best[0]):
+                best = (size, f)
+    pix = Path("/usr/share/pixmaps")
+    return best[1] if best else next((f for f in pix.glob(f"{icon}.*") if f.suffix in IMAGE_TYPES), None)
+
+
+def program_icon_file(name):
+    spec = PROGRAMS[name]
+    if spec.get("icon"):
+        return theme_icon(str(Path(spec["icon"]).expanduser()) if "/" in spec["icon"] else spec["icon"])
+    for d in (Path.home() / ".local/share/applications", Path("/usr/share/applications")):
+        desktop = d / f"{spec['launch']}.desktop"
+        with contextlib.suppress(OSError):
+            for line in desktop.read_text().splitlines():
+                if line.startswith("Icon="):
+                    return theme_icon(line[5:].strip())
+    return None
+
+
+def page_icon_url(page):
+    """The best icon a web page declares (apple-touch-icon first, it's the big one), else /favicon.ico."""
+    html = fetch(page, 512 * 1024)[0].decode("utf-8", "replace")
+    links = re.findall(r"<link\b[^>]*>", html, re.I)
+    for want in ("apple-touch-icon", "icon"):
+        for tag in links:
+            rel = re.search(r'rel=["\']?([^"\'>]+)', tag, re.I)
+            href = re.search(r'href=["\']?([^"\'\s>]+)', tag, re.I)
+            if rel and href and want in rel.group(1).lower().split():
+                return urljoin(page, href.group(1))
+    return urljoin(page, "/favicon.ico")
+
+
+def find_app_icon(name):
+    """Fetch and cache one app's icon; True once it has one."""
+    spec = APPS[name]
+    want = spec.get("icon")
+    if want and not want.startswith(("http://", "https://")) and ("/" in want or "." in want):
+        f = Path(want).expanduser()
+        if not f.is_absolute() and "compose" in spec:
+            f = Path(spec["compose"]["dir"]).expanduser() / f
+        if f.exists():
+            save_icon("app", name, f.read_bytes(), f.suffix.lower())
+            return True
+        return False
+    if want:
+        url = want if want.startswith("http") else DASHBOARD_ICONS.format(want)
+    else:
+        main = next((w for w in spec.get("web", []) if w.get("port")), None)
+        if not main:
+            return False
+        url = page_icon_url(f"http://127.0.0.1:{main['port']}/")
+    data, ctype = fetch(url)
+    if ctype.startswith("text/"):  # e.g. a single-page app answering /favicon.ico with its HTML
+        return False
+    save_icon("app", name, data, ext_of(ctype, url))
+    return bool(cached_icon("app", name))
+
+
+def icons_loop():
+    """Programs' icons are local, so they're found straight away. Apps without one are tried every
+    10 minutes, as their pages only answer while they're up."""
+    for name in PROGRAMS:
+        with contextlib.suppress(Exception):  # an odd icon folder (e.g. hicolor/symbolic) must not end this thread
+            if not cached_icon("program", name) and (f := program_icon_file(name)):
+                save_icon("program", name, f.read_bytes(), f.suffix.lower())
+    while True:
+        for name in APPS:
+            if not cached_icon("app", name):
+                with contextlib.suppress(Exception):  # a page that's down or odd just means "try later"
+                    find_app_icon(name)
+        time.sleep(600)
+
+
+def icon_url(kind, name):
+    f = cached_icon(kind, name)
+    return f"/api/icon/{kind}/{name}?v={int(f.stat().st_mtime)}" if f else None
 
 
 # ---- phone panel ---------------------------------------------------------------------------
 
 busy = {}  # app -> "starting" | "stopping" | "restarting" | "restarting <container>" | "error: ..."
+busy_lock = threading.Lock()  # two taps landing together must not both start the same job
 
 
 def in_progress(app):
@@ -832,15 +996,17 @@ def in_progress(app):
 
 
 def run_in_background(app, label, work):
-    if in_progress(app):
-        return False
-    busy[app] = label
+    with busy_lock:
+        if in_progress(app):
+            return False
+        busy[app] = label
 
     def go():
         try:
             work()
             busy.pop(app, None)
-        except Exception as e:  # shown in the panel until the next action
+        except Exception as e:  # shown in the panel until the next action, and kept in the journal
+            print(f"{app}: {label} failed: {e}", flush=True)
             busy[app] = f"error: {e}"
 
     threading.Thread(target=go, daemon=True).start()
@@ -863,7 +1029,7 @@ def snapshot():
                        "built": built.get(c["image_id"]), "update": has_update(c), **stats.get(c["name"], {})}
                       for c in cs]
         rows.append({
-            "id": app, "label": spec.get("label", app), "note": spec.get("note", ""),
+            "id": app, "label": spec.get("label", app), "note": spec.get("note", ""), "icon": icon_url("app", app),
             **status(app, every), "busy": busy.get(app), "web": links(app, every),
             "gpu": bool(spec.get("gpu")), "gpu_clash": gpu_clash(app, every, host["gpu"]),
             "can_update": "compose" in spec, "updates": [c["name"] for c in containers if c["update"]],
@@ -887,13 +1053,15 @@ class Panel(BaseHTTPRequestHandler):
             return
         print(f"{self.command} {self.path} {code} host={self.headers.get('Host')} ua={self.headers.get('User-Agent', '')[:70]}", flush=True)
 
-    def reply(self, code, body, ctype="application/json", cookie=None):
+    def reply(self, code, body, ctype="application/json", cookie=None, cache="no-store"):
         data = body if isinstance(body, bytes) else body.encode()
         try:
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("Cache-Control", cache)
+            if ctype == IMAGE_TYPES[".svg"]:  # an SVG opened on its own could run script on the panel's address
+                self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
             if cookie:
                 self.send_header("Set-Cookie", cookie)
             self.end_headers()
@@ -933,8 +1101,14 @@ class Panel(BaseHTTPRequestHandler):
             last_poll[0] = time.time()
             return self.reply(200, json.dumps(snapshot()))
         if len(parts) == 3 and parts[:2] == ["api", "logs"] and owner(parts[2], inspect_all()):
-            n = min(max(int((parse_qs(url.query).get("lines") or ["300"])[0]), 50), 2000)
+            try:
+                n = min(max(int((parse_qs(url.query).get("lines") or ["300"])[0]), 50), 2000)
+            except ValueError:
+                n = 300
             return self.reply(200, logs(parts[2], n), "text/plain; charset=utf-8")
+        if len(parts) == 4 and parts[:2] == ["api", "icon"] and parts[3] in {"app": APPS, "program": PROGRAMS}.get(parts[2], ()):
+            if f := cached_icon(parts[2], parts[3]):  # the ?v= in its link changes when the file does
+                return self.reply(200, f.read_bytes(), IMAGE_TYPES[f.suffix], cache="private, max-age=31536000, immutable")
         if url.path in ("/", "/index.html"):
             return self.reply(200, (HERE / "panel.html").read_bytes(), "text/html; charset=utf-8")
         if url.path == "/icon.png" and ICON.exists():
@@ -956,7 +1130,7 @@ class Panel(BaseHTTPRequestHandler):
             return
         if self.headers.get("X-Dock") != "1":
             return self.reply(403, "{}")
-        parts = self.path.strip("/").split("/")
+        parts = urlparse(self.path).path.strip("/").split("/")
         # api/apps/<id|all>/<on|off|restart|update>
         if len(parts) == 4 and parts[:2] == ["api", "apps"] and parts[3] in VERB:
             if parts[2] == "all" or parts[2] in APPS:
@@ -990,6 +1164,7 @@ def main():
         threading.Thread(target=stats_loop, daemon=True).start()
         threading.Thread(target=updates_loop, daemon=True).start()
         threading.Thread(target=timers_loop, daemon=True).start()
+        threading.Thread(target=icons_loop, daemon=True).start()
         print(f"panel on http://127.0.0.1:{PORT}", flush=True)
         ThreadingHTTPServer(("127.0.0.1", PORT), Panel).serve_forever()
     elif cmd == "status":
@@ -1025,7 +1200,10 @@ def main():
                 if clash := gpu_clash(app, inspect_all()):
                     print(f"warning: {', '.join(clash)} is also on the GPU; both may not fit on the card", file=sys.stderr)
             print(f"{cmd} {app} ...", flush=True)
-            turn(app, cmd)
+            try:
+                turn(app, cmd)
+            except RuntimeError as e:
+                sys.exit(f"{app}: {e}")
     elif cmd in ("open", "close", "later") and len(sys.argv) == 3:
         name = sys.argv[2].lower()
         if name not in PROGRAMS:

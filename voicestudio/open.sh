@@ -2,7 +2,7 @@
 # Menu launcher "VoiceStudio (Docker)": turns the Docker copy on if it's off, waits until it answers, then opens it in
 # its own window (Chrome app mode, no tabs or address bar). The desktop app can't share the 8 GB card with it, so if the
 # desktop app is open this says so instead of starting a copy that would run out of memory.
-DOCK="$HOME/claude_workspace/docker-master/dock"
+DOCK="$HOME/claude_workspace/linux-remote/dock"
 URL=http://127.0.0.1:3901/
 note() { command -v notify-send >/dev/null && notify-send -i voicestudio-docker "VoiceStudio" "$1"; echo "$1"; }
 

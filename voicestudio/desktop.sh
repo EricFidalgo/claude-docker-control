@@ -3,7 +3,7 @@
 # The desktop app and the Docker copy can't both fit on the 8 GB card: with the container holding ~2 GB, desktop
 # renders fail with "CUDA out of memory". So: turn the container off, run the desktop app, and once it has fully
 # closed, turn the container back on if it was on before (the phone and Claude's voice tools use it).
-DOCK="$HOME/claude_workspace/docker-master/dock"
+DOCK="$HOME/claude_workspace/linux-remote/dock"
 APP=/opt/VoiceStudio/voicestudio-electron
 
 was_on=0

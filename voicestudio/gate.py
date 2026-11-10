@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
-import lock  # noqa: E402  (docker-master/lock.py)
+import lock  # noqa: E402  (linux-remote/lock.py)
 
 LISTEN = int(os.environ.get("GATE_PORT", "3901"))
 UPSTREAM = ("127.0.0.1", int(os.environ.get("GATE_UPSTREAM_PORT", "3903")))
